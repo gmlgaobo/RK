@@ -22,9 +22,14 @@ int main(int argc, char** argv) {
     if (argc >= 2) {
         device = argv[1];
     }
+    if (argc >= 4) {
+        width = atoi(argv[2]);
+        height = atoi(argv[3]);
+    }
 
     printf("RK3588 HDMI Capture Preview\n");
-    printf("Device: %s\nResolution: %dx%d\n", device, width, height);
+    printf("Usage: %s [device] [width] [height]\n", argv[0]);
+    printf("Device: %s\nRequested resolution: %dx%d\n", device, width, height);
 
     hdmi_capture_t cap;
     if (hdmi_open(&cap, device, width, height) != 0) {
