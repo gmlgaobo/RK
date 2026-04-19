@@ -181,7 +181,6 @@ int hdmi_get_frame(hdmi_capture_t* cap, uint8_t** out_data, int* out_width, int*
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     buf.memory = V4L2_MEMORY_MMAP;
     buf.m.planes = planes;
-    buf.length = 1;
 
     if (xioctl(cap->fd, VIDIOC_DQBUF, &buf) < 0) {
         if (errno == EAGAIN) {
@@ -207,7 +206,6 @@ void hdmi_release_frame(hdmi_capture_t* cap) {
     buf.memory = V4L2_MEMORY_MMAP;
     buf.index = cap->current_buf;
     buf.m.planes = planes;
-    buf.length = 1;
 
     if (xioctl(cap->fd, VIDIOC_QBUF, &buf) < 0) {
         perror("VIDIOC_QBUF");
