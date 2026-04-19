@@ -22,5 +22,7 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
 )
 
+link_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/aarch64)
+
 add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
-target_link_libraries(pose_demo pthread ${OpenCV_LIBS} /home/ztl/github/RK/librknn_api.so)
+target_link_libraries(pose_demo pthread ${OpenCV_LIBS} rknn_api)
