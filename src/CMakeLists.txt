@@ -16,7 +16,8 @@ target_link_libraries(hid_mouse_test pthread)
 # YOLOv8n-pose detection demo (requires rknn-toolkit2)
 # Add common RKNN library search paths for RK3588 aarch64
 include_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/include)
-link_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/aarch64)
+# Search project root directory first if you copied the library there
+link_directories(/home/ztl/github/RK /home/ztl/toolkit2/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/aarch64)
 
 find_library(RKNN_LIB rknn_api)
 if(RKNN_LIB)
