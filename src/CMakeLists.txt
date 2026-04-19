@@ -22,8 +22,5 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
 )
 
-# Add the library directory
-link_directories(/home/ztl/github/RK)
-
 add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
-target_link_libraries(pose_demo pthread ${OpenCV_LIBS} rknn_api)
+target_link_libraries(pose_demo pthread ${OpenCV_LIBS} /home/ztl/github/RK/librknn_api.so)
