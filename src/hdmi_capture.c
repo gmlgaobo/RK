@@ -202,11 +202,11 @@ int hdmi_get_frame(hdmi_capture_t* cap, uint8_t** out_data, int* out_width, int*
     memset(planes, 0, sizeof(planes));
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     buf.memory = V4L2_MEMORY_MMAP;
-    buf.m.planes = planes;
-    // For mplane API: buf.length = number of planes
     buf.length = 1;
-    // For Rockchip rk_hdmirx, need to initialize bytesused for the plane
-    planes[0].bytesused = cap->width * cap->height * 3;
+    buf.m.planes = planes;
+
+    // When dequeuing, we don't set index - kernel gives us the buffer
+    // bytesused will be filled by kernel, so we don't need to set it
 
     // Dequeue a filled buffer from the driver
     if (xioctl(cap->fd, VIDIOC_DQBUF, &buf) < 0) {
@@ -234,9 +234,11 @@ void hdmi_release_frame(hdmi_capture_t* cap) {
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     buf.memory = V4L2_MEMORY_MMAP;
     buf.index = cap->current_buf;
-    buf.m.planes = planes;
     buf.length = 1;
-    planes[0].bytesused = cap->width * cap->height * 3;
+    buf.m.planes = planes;
+
+    // When queueing, bytesused is 0 for capture - driver will fill it when captured
+    planes[0].bytesused = 0;
 
     // Re-queue the buffer back to driver after we're done with it
     if (xioctl(cap->fd, VIDIOC_QBUF, &buf) < 0) {
