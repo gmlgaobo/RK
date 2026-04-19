@@ -70,7 +70,7 @@ static void nms(std::vector<PoseDetection>& input, std::vector<PoseDetection>& o
 }
 
 YoloPoseInference::YoloPoseInference() {
-    rknn_ctx_ = nullptr;
+    rknn_ctx_ = 0;
     initialized_ = false;
     input_width_ = 640;  // YOLOv8 default input size
     input_height_ = 640;
@@ -100,7 +100,7 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
         return -1;
     }
 
-    fread(model_buffer, 1, model_size, fp);
+    (void)fread(model_buffer, 1, model_size, fp);
     fclose(fp);
 
     // Init RKNN
@@ -206,7 +206,7 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     rknn_output output;
     memset(&output, 0, sizeof(output));
     output.index = 0;
-    output.fmt = RKNN_TENSOR_FLOAT32;
+    output.buf_type = RKNN_TENSOR_FLOAT32;
     ret = rknn_outputs_get(rknn_ctx_, 1, &output, nullptr);
     if (ret != 0) {
         fprintf(stderr, "rknn_outputs_get failed: %d\n", ret);
