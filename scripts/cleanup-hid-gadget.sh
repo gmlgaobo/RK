@@ -9,21 +9,28 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
-cd /sys/kernel/config/usb_gadget/rk3588-aimbot
+# configfs doesn't allow removing non-empty directories, need to clean in correct order
+if [ -d /sys/kernel/config/usb_gadget/rk3588-aimbot ]; then
+    cd /sys/kernel/config/usb_gadget/rk3588-aimbot
 
-# Unbind
-echo "" > UDC
+    # Unbind from UDC
+    echo "" > UDC 2>/dev/null || true
 
-# Remove symlink
-rm -f configs/c.1/hid.usb0
+    # Remove symlink from config to function
+    rm -f configs/c.1/hid.usb0 2>/dev/null || true
 
-# Remove directories
-rm -rf configs/c.1/strings/0x409
-rmdir configs/c.1
-rm -rf functions/hid.usb0
-rm -rf strings/0x409
+    # Cleanup config
+    rm -rf configs/c.1/strings/0x409 2>/dev/null || true
+    rmdir configs/c.1 2>/dev/null || true
 
-cd ..
-rmdir rk3588-aimbot
+    # Cleanup function
+    rmdir functions/hid.usb0 2>/dev/null || true
+
+    # Cleanup strings
+    rm -rf strings/0x409 2>/dev/null || true
+
+    cd ..
+    rmdir rk3588-aimbot 2>/dev/null || true
+fi
 
 echo "Cleanup done"
