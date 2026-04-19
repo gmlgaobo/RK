@@ -206,7 +206,7 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     rknn_output output;
     memset(&output, 0, sizeof(output));
     output.index = 0;
-    output.buf_type = RKNN_TENSOR_FLOAT32;
+    output.type = RKNN_TENSOR_FLOAT32;
     ret = rknn_outputs_get(rknn_ctx_, 1, &output, nullptr);
     if (ret != 0) {
         fprintf(stderr, "rknn_outputs_get failed: %d\n", ret);
