@@ -20,7 +20,6 @@ include_directories(
   /home/ztl/toolkit2/rknn-toolkit2/rknpu2/include/rknn
 )
 
-# If library is in project root, directly link it
-link_directories(/home/ztl/github/RK)
+# Directly link from project root where you copied the library
 add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
-target_link_libraries(pose_demo pthread ${OpenCV_LIBS} rknn_api)
+target_link_libraries(pose_demo pthread ${OpenCV_LIbs} /home/ztl/github/RK/librknn_api.so /home/ztl/github/RK/librknn_api.a)
