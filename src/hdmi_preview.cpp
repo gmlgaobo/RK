@@ -6,11 +6,12 @@
 #include "hdmi_capture.h"
 #include <opencv2/opencv.hpp>
 #include <sys/time.h>
+#include <unistd.h>
 
 static double get_time_ms() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return tv->tv_sec * 1000.0 + tv->tv_usec / 1000.0;
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
 int main(int argc, char** argv) {
