@@ -18,6 +18,7 @@ target_link_libraries(hid_mouse_test pthread)
 include_directories(
   /home/ztl/toolkit2/rknn-toolkit2/rknpu2/include
   /home/ztl/toolkit2/rknn-toolkit2/rknpu2/include/rknn
+  /home/ztl/github/RK/src
 )
 
 # Directly link from project root where you copied the library
