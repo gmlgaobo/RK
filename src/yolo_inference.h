@@ -37,7 +37,7 @@ public:
     bool is_initialized() const { return initialized_; }
 
 private:
-    void* rknn_ctx_;
+    rknn_context rknn_ctx_;
     bool initialized_;
     int input_width_;
     int input_height_;

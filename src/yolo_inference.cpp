@@ -104,13 +104,12 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
     fclose(fp);
 
     // Init RKNN
-    rknn_context* ctx = new rknn_context;
-    int ret = rknn_init(ctx, model_buffer, model_size, 0, RKNN_FLAG_LOADING_ON_DEMAND);
+    rknn_context ctx;
+    int ret = rknn_init(&ctx, model_buffer, model_size, 0, 0);
     free(model_buffer); // RKNN copied it, we can free our copy
 
     if (ret != 0) {
         fprintf(stderr, "rknn_init failed: %d\n", ret);
-        delete ctx;
         return -1;
     }
 
@@ -119,7 +118,7 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
 
     // Get input tensor info
     rknn_input_output_num io_num;
-    ret = rknn_query(*ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+    ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret != 0) {
         fprintf(stderr, "rknn_query io num failed: %d\n", ret);
         release();
@@ -132,20 +131,20 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
     rknn_tensor_attr input_attr;
     memset(&input_attr, 0, sizeof(input_attr));
     input_attr.index = 0;
-    ret = rknn_query(*ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
+    ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
     if (ret == 0) {
         if (input_attr.n_dims == 4) {
             // NHWC: batch,height,width,channel
-            if (input_attr.shape[1] == 3) {
+            if (input_attr.dims[1] == 3) {
                 // NCHW
-                channel_ = input_attr.shape[1];
-                input_height_ = input_attr.shape[2];
-                input_width_ = input_attr.shape[3];
+                channel_ = input_attr.dims[1];
+                input_height_ = input_attr.dims[2];
+                input_width_ = input_attr.dims[3];
             } else {
                 // NHWC
-                input_height_ = input_attr.shape[1];
-                input_width_ = input_attr.shape[2];
-                channel_ = input_attr.shape[3];
+                input_height_ = input_attr.dims[1];
+                input_width_ = input_attr.dims[2];
+                channel_ = input_attr.dims[3];
             }
         }
         printf("Input size: %dx%d %d channels\n", input_width_, input_height_, channel_);
@@ -155,10 +154,8 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
 }
 
 void YoloPoseInference::release() {
-    if (initialized_ && rknn_ctx_) {
-        rknn_destroy(*(rknn_context*)rknn_ctx_);
-        delete (rknn_context*)rknn_ctx_;
-        rknn_ctx_ = nullptr;
+    if (initialized_) {
+        rknn_destroy(rknn_ctx_);
     }
     initialized_ = false;
 }
@@ -168,8 +165,6 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     if (!initialized_) {
         return result;
     }
-
-    rknn_context* ctx = (rknn_context*)rknn_ctx_;
 
     // Preprocess: resize to model input size, convert to NHWC RGB 0-1 float
     cv::Mat resized;
@@ -193,7 +188,7 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
         }
     }
 
-    int ret = rknn_inputs_set(ctx, 1, &input);
+    int ret = rknn_inputs_set(rknn_ctx_, 1, &input);
     free(input.buf);
     if (ret != 0) {
         fprintf(stderr, "rknn_inputs_set failed: %d\n", ret);
@@ -201,7 +196,7 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     }
 
     // Run inference
-    ret = rknn_run(ctx, nullptr);
+    ret = rknn_run(rknn_ctx_, nullptr);
     if (ret != 0) {
         fprintf(stderr, "rknn_run failed: %d\n", ret);
         return result;
@@ -212,14 +207,14 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     memset(&output, 0, sizeof(output));
     output.index = 0;
     output.type = RKNN_TENSOR_FLOAT32;
-    ret = rknn_outputs_get(ctx, 1, &output, nullptr);
+    ret = rknn_outputs_get(rknn_ctx_, 1, &output, nullptr);
     if (ret != 0) {
         fprintf(stderr, "rknn_outputs_get failed: %d\n", ret);
         return result;
     }
 
     // Process output
-    // YOLOv8n-pose output: (38, 8400) where 38 = 4box + 17*2kp
+    // YOLOv8n-pose output: (38, 8400) where 38 = 4box + 17*2kp + 17 score = 4 + 17*3 = 38
     float* out = (float*)output.buf;
     int num_detections = 8400;
     float scale_x = (float)bgr_img.cols / (float)input_width_;
@@ -263,7 +258,7 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     std::vector<PoseDetection> nms_result;
     nms(candidates, nms_result, 0.7f);
 
-    rknn_outputs_release(ctx, 1, &output);
+    rknn_outputs_release(rknn_ctx_, 1, &output);
 
     return nms_result;
 }
