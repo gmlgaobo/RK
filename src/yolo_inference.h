@@ -1,6 +1,7 @@
 #ifndef YOLO_POSE_INFERENCE_H
 #define YOLO_POSE_INFERENCE_H
 
+#include "rknn_api.h"
 #include <stdint.h>
 #include <vector>
 #include <opencv2/opencv.hpp>
