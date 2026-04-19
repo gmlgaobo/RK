@@ -14,8 +14,8 @@ add_executable(hid_mouse_test usb_hid.c hid_mouse_test.c)
 target_link_libraries(hid_mouse_test pthread)
 
 # YOLOv8n-pose detection demo (requires rknn-toolkit2)
-# Add common RKNN library search paths for RK3588 aarch64
-include_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/include /home/ztl/github/RK)
+# Add common RKNN include path for RK3588
+include_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/include)
 
 # If library is in project root, directly link it
 add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
