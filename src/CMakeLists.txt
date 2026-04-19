@@ -14,9 +14,10 @@ add_executable(hid_mouse_test usb_hid.c hid_mouse_test.c)
 target_link_libraries(hid_mouse_test pthread)
 
 # YOLOv8n-pose detection demo (requires rknn-toolkit2)
-# Add common RKNN include path for RK3588
+# Add common RKNN include path for RK3588 - use correct rockchip subdir
 include_directories(
   /home/ztl/toolkit2/rknn-toolkit2/rknpu2/include
+  /home/ztl/toolkit2/rknn-toolkit2/rknpu2/include/rockchip
   /home/ztl/toolkit2/rknn-toolkit2/rknpu2/include/rknn
   /home/ztl/github/RK/src
   ${OpenCV_INCLUDE_DIRS}

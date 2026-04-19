@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "rknn_api.h"
+#include <rockchip/rknn_api.h>
 #include "opencv2/opencv.hpp"
 
 // YOLOv8n-pose output shape: 1x(1 + 17)*8400 = 18x8400 = 151200
