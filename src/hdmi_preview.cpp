@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
     printf("Press 'q' or ESC to quit\n");
 
     cv::namedWindow("HDMI Preview", cv::WINDOW_NORMAL);
-    cv::resizeWindow("HDMI Preview", 960, 540);
+    //  cv::resizeWindow("HDMI Preview", 960, 540);
 
     int frame_count = 0;
     double start_time = get_time_ms();
