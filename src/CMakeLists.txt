@@ -15,15 +15,8 @@ target_link_libraries(hid_mouse_test pthread)
 
 # YOLOv8n-pose detection demo (requires rknn-toolkit2)
 # Add common RKNN library search paths for RK3588 aarch64
-include_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/include)
-# Search project root directory first if you copied the library there
-link_directories(/home/ztl/github/RK /home/ztl/toolkit2/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/aarch64)
+include_directories(/home/ztl/toolkit2/rknn-toolkit2/rknpu2/include /home/ztl/github/RK)
 
-find_library(RKNN_LIB rknn_api)
-if(RKNN_LIB)
-    message(STATUS "Found RKNN library: ${RKNN_LIB}")
-    add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
-    target_link_libraries(pose_demo pthread ${OpenCV_LIBS} ${RKNN_LIB})
-else()
-    message(STATUS "WARNING: rknn_api not found, will not build pose_demo")
-endif()
+# If library is in project root, directly link it
+add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
+target_link_libraries(pose_demo pthread ${OpenCV_LIBS} /home/ztl/github/RK/librknn_api.a /home/ztl/github/RK/librknn_api.so)
