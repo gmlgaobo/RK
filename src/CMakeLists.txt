@@ -12,3 +12,13 @@ target_link_libraries(hdmi_preview pthread ${OpenCV_LIBS})
 # USB HID mouse test
 add_executable(hid_mouse_test usb_hid.c hid_mouse_test.c)
 target_link_libraries(hid_mouse_test pthread)
+
+# YOLOv8n-pose detection demo (requires rknn-toolkit2)
+find_library(RKNN_LIB rknn_api)
+if(RKNN_LIB)
+    message(STATUS "Found RKNN library: ${RKNN_LIB}")
+    add_executable(pose_demo hdmi_capture.c yolo_inference.cpp pose_demo.cpp)
+    target_link_libraries(pose_demo pthread ${OpenCV_LIBS} ${RKNN_LIB})
+else()
+    message(STATUS "WARNING: rknn_api not found, will not build pose_demo")
+endif()

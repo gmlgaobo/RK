@@ -84,3 +84,27 @@ sudo ./scripts/cleanup-hid-gadget.sh
 
 ### 自动开机启动
 可以把 `configure-hid-gadget.sh` 添加到 systemd 服务，开机自动配置。
+
+## 第三步：YOLOv8n-pose 姿态检测
+
+RK3588 NPU 推理，检测人体姿态关键点，用于自动瞄准。
+
+### 模型准备
+
+需要先把 YOLOv8n-pose 导出为 ONNX，然后用 rknn-toolkit2 转换为 `.rknn` 模型：
+
+1. 从 ultralytics 导出 `yolov8n-pose.onnx`
+2. 用 `rknn-toolkit2` 转换为 `yolov8n-pose.rknn`
+3. 将 `yolov8n-pose.rknn` 放在项目根目录
+
+### 运行检测demo
+
+```bash
+./build/src/pose_demo /dev/video40 1920 1080 ./yolov8n-pose.rknn
+```
+
+会显示实时画面，画出检测框、关键点和骨架。
+
+## 第四步：闭环自动瞄准
+
+TODO: 主闭环程序，检测到胸部位置，计算鼠标移动，发送到 USB HID
