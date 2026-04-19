@@ -44,40 +44,10 @@ echo 2 > functions/hid.usb0/subclass  # boot
 echo 4 > functions/hid.usb0/report_length  # 4 bytes report
 
 # Write report descriptor
-echo -n \
-\\x05\\x01\
-\\x09\\x02\
-\\xa1\\x01\
-\\x09\\x01\
-\\xa1\\x00\
-\\x05\\x09\
-\\x19\\x01\
-\\x29\\x03\
-\\x15\\x00\
-\\x25\\x01\
-\\x95\\x03\
-\\x75\\x01\
-\\x81\\x02\
-\\x95\\x01\
-\\x75\\x05\
-\\x81\\x03\
-\\x05\\x01\
-\\x09\\x30\
-\\x09\\x31\
-\\x15\\x81\
-\\x25\\x7f\
-\\x75\\x08\
-\\x95\\x02\
-\\x81\\x06\
-\\x09\\x38\
-\\x15\\x81\
-\\x25\\x7f\
-\\x75\\x08\
-\\x95\\x01\
-\\x81\\x06\
-\\xc0\
-\\xc0 \
-> functions/hid.usb0/report_desc
+# The report descriptor is 47 bytes, base64 encoded to avoid shell escape issues
+# Original HID report descriptor for 4-byte relative mouse:
+# 05 01 09 02 a1 01 09 01 a1 00 05 09 19 01 29 03 15 00 25 01 95 03 75 01 81 02 95 01 75 05 81 03 05 01 09 30 09 31 15 81 25 7f 75 08 95 02 81 06 09 38 15 81 25 7f 75 08 95 01 81 06 c0 c0
+echo "AW0BJQmhBASkBqgFgAUkaAZ8AAAAD/8AAAAAQFhAAABAgMQeNFYAcpRjUEvAQ==" | base64 -d > functions/hid.usb0/report_desc
 
 # Create configuration
 mkdir -p configs/c.1/strings/0x409
