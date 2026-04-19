@@ -59,6 +59,19 @@ int hdmi_open(hdmi_capture_t* cap, const char* device, int width, int height) {
 
     printf("Driver: %s\nCard: %s\nBus: %s\n", cap_info.driver, cap_info.card, cap_info.bus_info);
 
+    // Check HDMI signal presence
+    struct v4l2_control ctrl;
+    ctrl.id = 0x00a00964; // power_present control
+    if (xioctl(cap->fd, VIDIOC_G_CTRL, &ctrl) >= 0) {
+        if (ctrl.value != 1) {
+            fprintf(stderr, "\nWARNING: No HDMI signal detected!\n");
+            fprintf(stderr, "power_present = %d\n", ctrl.value);
+            fprintf(stderr, "Check HDMI cable and signal source.\n\n");
+        } else {
+            printf("HDMI signal detected: OK\n");
+        }
+    }
+
     // Set pixel format
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
