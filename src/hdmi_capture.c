@@ -2,6 +2,7 @@
  * RK3588 HDMI-IN Capture
  * Adapts to rk_hdmirx driver with V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
  * Supports 1920x1080 BGR24 format
+ * 2026-04-19 10:36 再次更新 - 逐行注释 + 修复 buf.length
  */
 
 #include "hdmi_capture.h"
@@ -17,6 +18,7 @@
 #include <linux/videodev2.h>
 
 // Helper: ioctl wrapper, retry on EINTR
+// When system call is interrupted by signal, retry it
 static int xioctl(int fd, int req, void* arg) {
     int r;
     do {
