@@ -1,0 +1,19 @@
+
+# 忽略文件夹
+
+build/
+dist/
+output/
+tmp/
+temp/
+
+# 忽略日志、缓存
+*.log
+*.tmp
+*.cache
+
+# 忽略环境、依赖（Python/Node）
+venv/
+node_modules/
+.env
+.DS_Store

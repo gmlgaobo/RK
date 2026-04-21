@@ -1,6 +1,6 @@
 /*
  * YOLOv8n-pose Inference on RK3588 NPU via RKNN
- * Takes BGR image from HDMI capture, runs detection, returns pose keypoints
+ * Optimized for performance - with detailed timing
  */
 
 #include "yolo_inference.h"
@@ -10,32 +10,29 @@
 #include <string.h>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <vector>
 
 #include "rknn_api.h"
 #include "opencv2/opencv.hpp"
 
-// YOLOv8n-pose output shape: 1x(1 + 17)*8400 = 18x8400 = 151200
-// box cx,cy,w,h + 17 kp * 2 = 4 + 34 = 38 values per box
-// So output is 1 x 38 x 8400 = 1 x 8400 x 38 for NCHW or NHWC depending on model export
+#ifdef USE_RGA_PREPROCESS
+#include "rga_preprocess.h"
+#endif
 
-static inline float sigmoid(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
+using namespace std::chrono;
 
-// NMS non-maximum suppression to remove overlapping boxes
 static void nms(std::vector<PoseDetection>& input, std::vector<PoseDetection>& output, float iou_threshold) {
     sort(input.begin(), input.end(), [](const PoseDetection& a, const PoseDetection& b) {
         return a.score > b.score;
     });
 
     while (!input.empty()) {
-        // Take highest score box
         output.push_back(input[0]);
         if (input.size() == 1) {
             break;
         }
 
-        // Remove overlapping boxes with IoU > threshold
         std::vector<PoseDetection> remaining;
         float x1a = input[0].x - input[0].w / 2.0f;
         float y1a = input[0].y - input[0].h / 2.0f;
@@ -72,30 +69,36 @@ static void nms(std::vector<PoseDetection>& input, std::vector<PoseDetection>& o
 YoloPoseInference::YoloPoseInference() {
     rknn_ctx_ = 0;
     initialized_ = false;
-    input_width_ = 640;  // YOLOv8 default input size
+    input_width_ = 640;
     input_height_ = 640;
     channel_ = 3;
+    output_quantized_ = false;
+    output_scale_ = 0.0f;
+    output_zero_point_ = 0;
+    output_type_ = 0;
+    input_buf_ = nullptr;
+    input_buf_size_ = 0;
+    memset(&last_timing_, 0, sizeof(last_timing_));
 }
 
 YoloPoseInference::~YoloPoseInference() {
     release();
 }
 
-int YoloPoseInference::init(const char* model_path, bool use_npu) {
+int YoloPoseInference::init(const char* model_path, int input_width, int input_height) {
     FILE* fp = fopen(model_path, "rb");
     if (!fp) {
         fprintf(stderr, "Failed to open model: %s\n", model_path);
         return -1;
     }
 
-    // Get model size
     fseek(fp, 0, SEEK_END);
     size_t model_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
     void* model_buffer = malloc(model_size);
     if (!model_buffer) {
-        fprintf(stderr, "Failed to allocate memory for model\n");
+        fprintf(stderr, "Failed to allocate memory\n");
         fclose(fp);
         return -1;
     }
@@ -103,10 +106,9 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
     (void)fread(model_buffer, 1, model_size, fp);
     fclose(fp);
 
-    // Init RKNN
     rknn_context ctx;
     int ret = rknn_init(&ctx, model_buffer, model_size, 0, 0);
-    free(model_buffer); // RKNN copied it, we can free our copy
+    free(model_buffer);
 
     if (ret != 0) {
         fprintf(stderr, "rknn_init failed: %d\n", ret);
@@ -116,7 +118,11 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
     rknn_ctx_ = ctx;
     initialized_ = true;
 
-    // Get input tensor info
+#ifdef USE_RGA_PREPROCESS
+    // Initialize RGA hardware for preprocessing
+    rga_preprocess_init();
+#endif
+
     rknn_input_output_num io_num;
     ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret != 0) {
@@ -127,37 +133,369 @@ int YoloPoseInference::init(const char* model_path, bool use_npu) {
 
     printf("YOLOv8n-pose model loaded: %d inputs, %d outputs\n", io_num.n_input, io_num.n_output);
 
-    // Get input dimensions
     rknn_tensor_attr input_attr;
     memset(&input_attr, 0, sizeof(input_attr));
     input_attr.index = 0;
     ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
     if (ret == 0) {
+        printf("Input tensor info:\n");
+        printf("  type: %d\n", input_attr.type);
+        printf("  qnt_type: %d\n", input_attr.qnt_type);
+        printf("  fmt: %d\n", input_attr.fmt);
+        printf("  dims: [%d, %d, %d, %d]\n",
+               input_attr.dims[0], input_attr.dims[1],
+               input_attr.dims[2], input_attr.dims[3]);
+        
         if (input_attr.n_dims == 4) {
-            // NHWC: batch,height,width,channel
             if (input_attr.dims[1] == 3) {
-                // NCHW
                 channel_ = input_attr.dims[1];
                 input_height_ = input_attr.dims[2];
                 input_width_ = input_attr.dims[3];
             } else {
-                // NHWC
                 input_height_ = input_attr.dims[1];
                 input_width_ = input_attr.dims[2];
                 channel_ = input_attr.dims[3];
             }
         }
         printf("Input size: %dx%d %d channels\n", input_width_, input_height_, channel_);
+        if (input_attr.qnt_type != RKNN_TENSOR_QNT_NONE) {
+            printf("  Input quantized: scale=%f, zp=%d\n", input_attr.scale, input_attr.zp);
+        }
     }
+
+    if (io_num.n_output >= 1) {
+        rknn_tensor_attr output_attr;
+        memset(&output_attr, 0, sizeof(output_attr));
+        output_attr.index = 0;
+        ret = rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &output_attr, sizeof(output_attr));
+        if (ret == 0) {
+            printf("Output tensor info:\n");
+            printf("  type: %d\n", output_attr.type);
+            printf("  qnt_type: %d\n", output_attr.qnt_type);
+            printf("  fmt: %d\n", output_attr.fmt);
+            printf("  dims: [%d, %d, %d, %d]\n",
+                   output_attr.dims[0], output_attr.dims[1],
+                   output_attr.dims[2], output_attr.dims[3]);
+            
+            output_type_ = output_attr.type;
+            output_fmt_ = output_attr.fmt;
+            memcpy(output_dims_, output_attr.dims, sizeof(output_dims_));
+            
+            if (output_attr.qnt_type != RKNN_TENSOR_QNT_NONE) {
+                output_quantized_ = true;
+                output_scale_ = output_attr.scale;
+                output_zero_point_ = output_attr.zp;
+                printf("  Quantized: scale=%.6f, zp=%d\n", output_scale_, output_zero_point_);
+            } else {
+                output_quantized_ = false;
+                printf("  Not quantized\n");
+            }
+            
+            // Determine output layout
+            // YOLOv8-pose output: could be [1, 56, 8400] (NCHW) or [1, 8400, 56] (NHWC)
+            if (output_attr.n_dims >= 3) {
+                if (output_attr.dims[1] == 56 && output_attr.dims[2] == 8400) {
+                    printf("  Output layout: NCHW [1, 56, 8400]\n");
+                } else if (output_attr.dims[1] == 8400 && output_attr.dims[2] == 56) {
+                    printf("  Output layout: NHWC [1, 8400, 56]\n");
+                } else {
+                    printf("  Output layout: unknown dims[%d, %d, %d, %d]\n",
+                           output_attr.dims[0], output_attr.dims[1],
+                           output_attr.dims[2], output_attr.dims[3]);
+                }
+            }
+        }
+    }
+    
+    input_buf_size_ = input_width_ * input_height_ * channel_;
+    input_buf_ = static_cast<uint8_t*>(malloc(input_buf_size_));
+    printf("Pre-allocated input buffer: %zu bytes\n", input_buf_size_);
 
     return 0;
 }
 
 void YoloPoseInference::release() {
+    if (input_buf_) {
+        free(input_buf_);
+        input_buf_ = nullptr;
+    }
     if (initialized_) {
         rknn_destroy(rknn_ctx_);
     }
     initialized_ = false;
+}
+
+static void fast_letterbox_opencv(const cv::Mat& image, uint8_t* output_buf, 
+                        int target_w, int target_h,
+                        float& scale, float& pad_left, float& pad_top) {
+    int img_w = image.cols;
+    int img_h = image.rows;
+    
+    float scale_x = static_cast<float>(target_w) / img_w;
+    float scale_y = static_cast<float>(target_h) / img_h;
+    scale = std::min(scale_x, scale_y);
+    
+    int new_w = static_cast<int>(img_w * scale);
+    int new_h = static_cast<int>(img_h * scale);
+    
+    pad_left = (target_w - new_w) / 2.0f;
+    pad_top = (target_h - new_h) / 2.0f;
+    
+    // 直接操作预分配的 buffer，减少中间步骤
+    cv::Mat padded(target_h, target_w, CV_8UC3, cv::Scalar(114, 114, 114));
+    
+    int x_offset = static_cast<int>(pad_left);
+    int y_offset = static_cast<int>(pad_top);
+    
+    // 缩放到中间位置
+    cv::Mat roi = padded(cv::Rect(x_offset, y_offset, new_w, new_h));
+    
+    // 缩放 + 颜色转换一步到位
+    cv::Mat resized;
+    cv::resize(image, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
+    
+    // HDMI reports BGR3 but actual data is RGB
+    // So we don't need color conversion, just copy directly
+    resized.copyTo(roi);
+    
+    // 直接拷贝
+    memcpy(output_buf, padded.data, target_w * target_h * 3);
+}
+
+// Exposed for pipeline mode (pose_demo.cpp)
+void fast_letterbox(const cv::Mat& image, uint8_t* output_buf,
+                        int target_w, int target_h,
+                        float& scale, float& pad_left, float& pad_top) {
+    // TEMPORARILY DISABLE RGA to test with OpenCV preprocessing
+    // This helps verify if the model is working correctly
+#ifndef FORCE_OPENCV_PREPROCESS
+#ifdef USE_RGA_PREPROCESS
+    if (rga_preprocess_available()) {
+        int ret = rga_letterbox(image.data, image.cols, image.rows,
+                                output_buf, target_w, target_h,
+                                &scale, &pad_left, &pad_top);
+        if (ret == 0) {
+            return;
+        }
+        // RGA failed, fallback to OpenCV
+    }
+#endif
+#endif
+    fast_letterbox_opencv(image, output_buf, target_w, target_h, scale, pad_left, pad_top);
+}
+
+// Internal: run NPU inference and postprocess
+static std::vector<PoseDetection> run_inference_postprocess(
+    rknn_context ctx,
+    uint8_t* input_buf,
+    size_t input_buf_size,
+    int input_width,
+    int input_height,
+    int* output_dims,
+    int output_type,
+    bool output_quantized,
+    float output_scale,
+    int32_t output_zero_point,
+    float scale,
+    float pad_left,
+    float pad_top,
+    float conf_threshold,
+    YoloPoseInference::TimingStats* timing)
+{
+    std::vector<PoseDetection> result;
+    
+    auto t1 = high_resolution_clock::now();
+
+    rknn_input input;
+    memset(&input, 0, sizeof(input));
+    input.index = 0;
+    input.type = RKNN_TENSOR_UINT8;
+    input.size = input_buf_size;
+    input.fmt = RKNN_TENSOR_NHWC;
+    input.buf = input_buf;
+
+    int ret = rknn_inputs_set(ctx, 1, &input);
+    if (ret != 0) {
+        fprintf(stderr, "rknn_inputs_set failed: %d\n", ret);
+        return result;
+    }
+
+    ret = rknn_run(ctx, nullptr);
+    if (ret != 0) {
+        fprintf(stderr, "rknn_run failed: %d\n", ret);
+        return result;
+    }
+
+    rknn_output output;
+    memset(&output, 0, sizeof(output));
+    output.index = 0;
+    output.want_float = 1;  // RKNN automatically dequantizes to float
+    ret = rknn_outputs_get(ctx, 1, &output, nullptr);
+    if (ret != 0) {
+        fprintf(stderr, "rknn_outputs_get failed: %d\n", ret);
+        return result;
+    }
+    
+    auto t2 = high_resolution_clock::now();
+    if (timing) {
+        timing->inference_ms = duration<float>(t2 - t1).count() * 1000.0f;
+    }
+
+    // RKNN with want_float=1 returns float buffer
+    float* float_buf = static_cast<float*>(output.buf);
+    
+    // Helper lambda to get value at index
+    auto get_value = [&](int idx) -> float {
+        return float_buf[idx];
+    };
+    
+    int num_detections = 8400;
+    int num_classes = 56;
+    std::vector<PoseDetection> candidates;
+    candidates.reserve(20);
+    
+    bool is_nchw = (output_dims[1] == 56 && output_dims[2] == 8400);
+    
+    // Debug: print first few raw output values
+    printf("[DEBUG] Output type=%d, is_nchw=%d, output.size=%u\n", output_type, is_nchw, output.size);
+    printf("[DEBUG] Channel 0-7 values at index 0: ");
+    for (int c = 0; c < 8; c++) {
+        printf("ch%d=%.3f ", c, get_value(c * num_detections + 0));
+    }
+    printf("\n");
+    printf("[DEBUG] First 10 values (channel 0, cx): ");
+    for (int i = 0; i < 10 && i < num_detections; i++) {
+        printf("%.3f ", get_value(i));
+    }
+    printf("\n");
+    printf("[DEBUG] First 10 values (channel 4, score): ");
+    for (int i = 0; i < 10 && i < num_detections; i++) {
+        printf("%.3f ", get_value(4 * num_detections + i));
+    }
+    printf("\n");
+    printf("[DEBUG] First 10 values (channel 5, keypoint x): ");
+    for (int i = 0; i < 10 && i < num_detections; i++) {
+        printf("%.3f ", get_value(5 * num_detections + i));
+    }
+    printf("\n");
+    
+    // Find max score across ALL detections
+    float max_score = 0;
+    int max_idx = -1;
+    for (int i = 0; i < num_detections; i++) {
+        float score = get_value(4 * num_detections + i);
+        if (score > max_score) {
+            max_score = score;
+            max_idx = i;
+        }
+    }
+    printf("[DEBUG] Max score: %.3f at index %d\n", max_score, max_idx);
+    
+    // Print some statistics about the scores
+    int count_0 = 0, count_1 = 0, count_10 = 0, count_50 = 0, count_100 = 0;
+    for (int i = 0; i < num_detections; i++) {
+        float score = get_value(4 * num_detections + i);
+        if (score < 0.001f) count_0++;
+        else if (score < 1.0f) count_1++;
+        else if (score < 10.0f) count_10++;
+        else if (score < 50.0f) count_50++;
+        else count_100++;
+    }
+    printf("[DEBUG] Score stats: <0.001=%d, <1=%d, <10=%d, <50=%d, >=50=%d\n", count_0, count_1, count_10, count_50, count_100);
+    
+    for (int i = 0; i < num_detections; i++) {
+        float cx, cy, w, h, score;
+        float kp_data[51];
+        
+        if (is_nchw) {
+            // NCHW format: [batch, channels, num_detections]
+            // Each channel contains all detections for that attribute
+            cx = get_value(i);
+            cy = get_value(num_detections + i);
+            w  = get_value(2 * num_detections + i);
+            h  = get_value(3 * num_detections + i);
+            score = get_value(4 * num_detections + i);
+            
+            for (int k = 0; k < NUM_KP; k++) {
+                kp_data[k * 3 + 0] = get_value((5 + k * 3 + 0) * num_detections + i);
+                kp_data[k * 3 + 1] = get_value((5 + k * 3 + 1) * num_detections + i);
+                kp_data[k * 3 + 2] = get_value((5 + k * 3 + 2) * num_detections + i);
+            }
+        } else {
+            // NHWC format: [batch, num_detections, channels]
+            cx = get_value(i * num_classes + 0);
+            cy = get_value(i * num_classes + 1);
+            w  = get_value(i * num_classes + 2);
+            h  = get_value(i * num_classes + 3);
+            score = get_value(i * num_classes + 4);
+            
+            for (int k = 0; k < NUM_KP; k++) {
+                kp_data[k * 3 + 0] = get_value(i * num_classes + 5 + k * 3 + 0);
+                kp_data[k * 3 + 1] = get_value(i * num_classes + 5 + k * 3 + 1);
+                kp_data[k * 3 + 2] = get_value(i * num_classes + 5 + k * 3 + 2);
+            }
+        }
+        
+        if (score < conf_threshold) {
+            continue;
+        }
+
+        PoseDetection det;
+        det.score = score;
+        
+        det.x = (cx - pad_left) / scale;
+        det.y = (cy - pad_top) / scale;
+        det.w = w / scale;
+        det.h = h / scale;
+
+        for (int k = 0; k < NUM_KP; k++) {
+            det.kp[k][0] = (kp_data[k * 3 + 0] - pad_left) / scale;
+            det.kp[k][1] = (kp_data[k * 3 + 1] - pad_top) / scale;
+            det.kp_score[k] = kp_data[k * 3 + 2];
+        }
+
+        candidates.push_back(det);
+    }
+    
+    // Debug: print first detection coordinates
+    if (!candidates.empty()) {
+        const auto& det = candidates[0];
+        printf("[DEBUG] Detection: bbox=(%.1f,%.1f,%.1f,%.1f) score=%.3f\n", 
+               det.x, det.y, det.w, det.h, det.score);
+        printf("[DEBUG] Keypoints: nose=(%.1f,%.1f,%.3f) left_eye=(%.1f,%.1f,%.3f) right_eye=(%.1f,%.1f,%.3f)\n",
+               det.kp[0][0], det.kp[0][1], det.kp_score[0],
+               det.kp[1][0], det.kp[1][1], det.kp_score[1],
+               det.kp[2][0], det.kp[2][1], det.kp_score[2]);
+        printf("[DEBUG] Keypoints: left_shoulder=(%.1f,%.1f,%.3f) right_shoulder=(%.1f,%.1f,%.3f)\n",
+               det.kp[5][0], det.kp[5][1], det.kp_score[5],
+               det.kp[6][0], det.kp[6][1], det.kp_score[6]);
+    }
+
+    // Count score distribution
+    int count_09 = 0, count_05 = 0, count_01 = 0, count_001 = 0;
+    for (const auto& c : candidates) {
+        if (c.score > 0.9f) count_09++;
+        if (c.score > 0.5f) count_05++;
+        if (c.score > 0.1f) count_01++;
+        if (c.score > 0.01f) count_001++;
+    }
+    printf("[DEBUG] Score distribution: >0.9=%d, >0.5=%d, >0.1=%d, >0.01=%d\n", count_09, count_05, count_01, count_001);
+    
+    std::vector<PoseDetection> nms_result;
+    if (!candidates.empty()) {
+        nms(candidates, nms_result, 0.65f);
+    }
+    
+    printf("[DEBUG] Candidates: %zu, After NMS: %zu\n", candidates.size(), nms_result.size());
+    
+    auto t3 = high_resolution_clock::now();
+    if (timing) {
+        timing->postprocess_ms = duration<float>(t3 - t2).count() * 1000.0f;
+    }
+
+    rknn_outputs_release(ctx, 1, &output);
+
+    return nms_result;
 }
 
 std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, float conf_threshold) {
@@ -165,99 +503,42 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
     if (!initialized_) {
         return result;
     }
+    
+    auto t0 = high_resolution_clock::now();
 
-    // Preprocess: resize to model input size, convert to NHWC RGB 0-1 float
-    cv::Mat resized;
-    cv::resize(bgr_img, resized, cv::Size(input_width_, input_height_));
-    cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
+    float scale, pad_left, pad_top;
+    fast_letterbox(bgr_img, input_buf_, input_width_, input_height_, scale, pad_left, pad_top);
+    
+    auto t1 = high_resolution_clock::now();
+    last_timing_.preprocess_ms = duration<float>(t1 - t0).count() * 1000.0f;
 
-    // Prepare RKNN input
-    rknn_input input;
-    memset(&input, 0, sizeof(input));
-    input.index = 0;
-    input.type = RKNN_TENSOR_FLOAT32;
-    input.size = input_width_ * input_height_ * channel_ * sizeof(float);
-    input.buf = malloc(input.size);
+    result = run_inference_postprocess(
+        rknn_ctx_, input_buf_, input_buf_size_,
+        input_width_, input_height_, output_dims_,
+        output_type_, output_quantized_, output_scale_, output_zero_point_,
+        scale, pad_left, pad_top, conf_threshold, &last_timing_);
 
-    // Normalize to 0-1
-    float* fbuf = (float*)input.buf;
-    unsigned char* data = resized.data;
-    for (int i = 0; i < input_width_ * input_height_; i++) {
-        for (int c = 0; c < 3; c++) {
-            fbuf[i * 3 + c] = data[i * 3 + c] / 255.0f;
-        }
-    }
+    return result;
+}
 
-    int ret = rknn_inputs_set(rknn_ctx_, 1, &input);
-    free(input.buf);
-    if (ret != 0) {
-        fprintf(stderr, "rknn_inputs_set failed: %d\n", ret);
+std::vector<PoseDetection> YoloPoseInference::detect_raw(
+    uint8_t* preprocessed_buf,
+    float scale,
+    float pad_left,
+    float pad_top,
+    float conf_threshold)
+{
+    std::vector<PoseDetection> result;
+    if (!initialized_) {
         return result;
     }
 
-    // Run inference
-    ret = rknn_run(rknn_ctx_, nullptr);
-    if (ret != 0) {
-        fprintf(stderr, "rknn_run failed: %d\n", ret);
-        return result;
-    }
+    // Use the provided preprocessed buffer directly (ZeroCopy)
+    result = run_inference_postprocess(
+        rknn_ctx_, preprocessed_buf, input_buf_size_,
+        input_width_, input_height_, output_dims_,
+        output_type_, output_quantized_, output_scale_, output_zero_point_,
+        scale, pad_left, pad_top, conf_threshold, nullptr);
 
-    // Get output
-    rknn_output output;
-    memset(&output, 0, sizeof(output));
-    output.index = 0;
-    ret = rknn_outputs_get(rknn_ctx_, 1, &output, nullptr);
-    if (ret != 0) {
-        fprintf(stderr, "rknn_outputs_get failed: %d\n", ret);
-        return result;
-    }
-
-    // Process output
-    // YOLOv8n-pose output: (38, 8400) where 38 = 4box + 17*2kp + 17 score = 4 + 17*3 = 38
-    float* out = (float*)output.buf;
-    int num_detections = 8400;
-    float scale_x = (float)bgr_img.cols / (float)input_width_;
-    float scale_y = (float)bgr_img.rows / (float)input_height_;
-
-    std::vector<PoseDetection> candidates;
-
-    for (int i = 0; i < num_detections; i++) {
-        // Output is [cx, cy, w, h, kp1x, kp1y, kp1s, kp2x, ... ]
-        // Wait - actually for ultralytics export, it's 38 x 8400 -> each column is one detection
-        float cx = out[i * 38 + 0];
-        float cy = out[i * 38 + 1];
-        float w = out[i * 38 + 2];
-        float h = out[i * 38 + 3];
-        float box_score = out[i * 38 + 4]; // actually objectness is already included in score
-        float score = sigmoid(box_score);
-
-        if (score < conf_threshold) {
-            continue;
-        }
-
-        PoseDetection det;
-        det.score = score;
-        // cx cy w h -> center in image coordinates
-        det.x = cx * scale_x;
-        det.y = cy * scale_y;
-        det.w = w * scale_x;
-        det.h = h * scale_y;
-
-        // Read 17 keypoints
-        for (int k = 0; k < NUM_KP; k++) {
-            det.kp[k][0] = out[i * 38 + 5 + k * 3 + 0] * scale_x;
-            det.kp[k][1] = out[i * 38 + 5 + k * 3 + 1] * scale_y;
-            det.kp_score[k] = sigmoid(out[i * 38 + 5 + k * 3 + 2]);
-        }
-
-        candidates.push_back(det);
-    }
-
-    // NMS
-    std::vector<PoseDetection> nms_result;
-    nms(candidates, nms_result, 0.7f);
-
-    rknn_outputs_release(rknn_ctx_, 1, &output);
-
-    return nms_result;
+    return result;
 }

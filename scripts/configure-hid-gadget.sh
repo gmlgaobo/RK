@@ -63,5 +63,15 @@ if [ -z "$UDC" ]; then
     exit 1
 fi
 echo "$UDC" > UDC
-echo "Gadget configured successfully, UDC: $UDC"
-echo "/dev/hidg0 should be created now"
+
+# Wait for device node to appear
+sleep 0.5
+
+# Fix permissions so non-root users can access it
+if [ -e /dev/hidg0 ]; then
+    chmod 666 /dev/hidg0
+    echo "Gadget configured successfully, UDC: $UDC"
+    echo "/dev/hidg0 created with permissions 666"
+else
+    echo "Warning: /dev/hidg0 not found after configuration"
+fi

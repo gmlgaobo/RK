@@ -6,15 +6,18 @@
 #include <vector>
 #include <opencv2/opencv.hpp>
 
-// 人体关键点数量 - YOLOv8n-pose 是 17 个关键点
 const int NUM_KP = 17;
 
-// 单个检测结果： bounding box + 置信度 + 17 个关键点
+// Exposed preprocessing function for pipeline mode
+void fast_letterbox(const cv::Mat& image, uint8_t* output_buf, 
+                    int target_w, int target_h,
+                    float& scale, float& pad_left, float& pad_top);
+
 struct PoseDetection {
-    float x, y, w, h;       // bounding box center x, y, width, height
-    float score;            // detection confidence
-    float kp[NUM_KP][2];   // keypoints x, y (image coordinates)
-    float kp_score[NUM_KP];// keypoint confidence
+    float x, y, w, h;
+    float score;
+    float kp[NUM_KP][2];
+    float kp_score[NUM_KP];
 };
 
 class YoloPoseInference {
@@ -22,20 +25,22 @@ public:
     YoloPoseInference();
     ~YoloPoseInference();
 
-    // 初始化 RKNN 模型，加载 .rknn 文件
-    // model_path: path to .rknn model file
-    // use_npu: true to use NPU, false to use CPU for debug
-    int init(const char* model_path, bool use_npu = true);
-
-    // 释放资源
+    int init(const char* model_path, int input_width = 0, int input_height = 0);
     void release();
-
-    // 运行推理，输入 BGR 图像，返回检测结果
-    // confidence_threshold: 过滤低置信度检测
-    std::vector<PoseDetection> detect(const cv::Mat& bgr_img, float confidence_threshold = 0.5f);
-
-    // 是否已初始化
+    std::vector<PoseDetection> detect(const cv::Mat& bgr_img, float conf_threshold = 0.5f);
+    // Raw detect with preprocessed buffer (for pipeline mode)
+    std::vector<PoseDetection> detect_raw(uint8_t* preprocessed_buf, float scale, float pad_left, float pad_top, float conf_threshold = 0.5f);
     bool is_initialized() const { return initialized_; }
+    
+    struct TimingStats {
+        float preprocess_ms;
+        float inference_ms;
+        float postprocess_ms;
+    };
+    TimingStats get_last_timing() const { return last_timing_; }
+    
+    int get_input_width() const { return input_width_; }
+    int get_input_height() const { return input_height_; }
 
 private:
     rknn_context rknn_ctx_;
@@ -43,6 +48,17 @@ private:
     int input_width_;
     int input_height_;
     int channel_;
+    bool output_quantized_;
+    float output_scale_;
+    int32_t output_zero_point_;
+    int output_type_;
+    int output_fmt_;  // NCHW or NHWC
+    int output_dims_[4];  // Store output dimensions
+    
+    uint8_t* input_buf_;
+    size_t input_buf_size_;
+    
+    TimingStats last_timing_;
 };
 
 #endif
