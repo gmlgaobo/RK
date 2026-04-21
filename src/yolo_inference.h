@@ -27,9 +27,9 @@ public:
 
     int init(const char* model_path, int input_width = 0, int input_height = 0);
     void release();
-    std::vector<PoseDetection> detect(const cv::Mat& bgr_img, float conf_threshold = 0.5f);
+    std::vector<PoseDetection> detect(const cv::Mat& bgr_img, float conf_threshold = 0.25f);
     // Raw detect with preprocessed buffer (for pipeline mode)
-    std::vector<PoseDetection> detect_raw(uint8_t* preprocessed_buf, float scale, float pad_left, float pad_top, float conf_threshold = 0.5f);
+    std::vector<PoseDetection> detect_raw(uint8_t* preprocessed_buf, float scale, float pad_left, float pad_top, float conf_threshold = 0.25f);
     bool is_initialized() const { return initialized_; }
     
     struct TimingStats {

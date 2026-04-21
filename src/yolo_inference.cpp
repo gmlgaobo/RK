@@ -483,7 +483,8 @@ static std::vector<PoseDetection> run_inference_postprocess(
     
     std::vector<PoseDetection> nms_result;
     if (!candidates.empty()) {
-        nms(candidates, nms_result, 0.65f);
+        // Lower NMS threshold to detect more overlapping objects (e.g., multiple people close together)
+        nms(candidates, nms_result, 0.45f);
     }
     
     printf("[DEBUG] Candidates: %zu, After NMS: %zu\n", candidates.size(), nms_result.size());

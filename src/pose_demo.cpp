@@ -196,12 +196,13 @@ void npu_thread(YoloPoseInference* inference) {
         auto t0 = high_resolution_clock::now();
         
         // Run NPU inference directly with preprocessed buffer
+        // Use lower confidence threshold (0.25) to detect more distant/small targets
         frame.detections = inference->detect_raw(
             frame.preprocessed.data,
             frame.scale,
             frame.pad_left,
             frame.pad_top,
-            0.5f
+            0.25f
         );
         
         auto t1 = high_resolution_clock::now();
@@ -265,6 +266,7 @@ int main(int argc, char** argv) {
     int input_h = inference.get_input_height();
 
     printf("\n");
+    printf("Model input resolution: %dx%d\n", input_w, input_h);
     printf("Streaming started, opening preview window...\n");
     printf("Press 'q' or ESC to quit\n");
     printf("\n");
