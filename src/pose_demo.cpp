@@ -13,6 +13,7 @@
 
 #include "hdmi_capture.h"
 #include "yolo_inference.h"
+#include "hid_controller.h"
 #include <opencv2/opencv.hpp>
 #include <sys/time.h>
 #include <unistd.h>
@@ -23,6 +24,7 @@
 #include <condition_variable>
 #include <queue>
 #include <atomic>
+#include <getopt.h>
 
 using namespace std::chrono;
 
@@ -127,6 +129,11 @@ ThreadQueue<PipelineFrame> display_queue(2);
 std::atomic<bool> running{true};
 std::atomic<int> frame_counter{0};
 std::atomic<size_t> total_dropped_frames{0};
+
+// Aim system (integrates aim engine + HID controller)
+hid::AimSystem* g_aim_system = nullptr;
+bool g_aim_enabled = true;  // 默认开启
+aim::AimPreset g_aim_preset = aim::AimPreset::LEGIT;
 
 // Preprocess thread: BGR -> RGB letterbox using fast_letterbox (with RGA support)
 void preprocess_thread(int input_w, int input_h) {
@@ -268,8 +275,22 @@ int main(int argc, char** argv) {
     printf("\n");
     printf("Model input resolution: %dx%d\n", input_w, input_h);
     printf("Streaming started, opening preview window...\n");
-    printf("Press 'q' or ESC to quit\n");
+    printf("Controls:\n");
+    printf("  'q' or ESC - Quit\n");
+    printf("  'a' - Toggle aim assist\n");
+    printf("  '1' - Legit preset (human-like)\n");
+    printf("  '2' - Semi-rage preset\n");
+    printf("  '3' - Rage preset\n");
     printf("\n");
+    
+    // Initialize aim system (engine + HID controller)
+    g_aim_system = new hid::AimSystem();
+    if (!g_aim_system->init(g_aim_preset)) {
+        fprintf(stderr, "Warning: Failed to initialize HID controller. Aim assist will be visual only.\n");
+        fprintf(stderr, "To enable HID control, run as root or configure udev rules.\n");
+    } else {
+        printf("Aim system initialized. Press 'a' to toggle aim assist.\n");
+    }
 
     cv::namedWindow("YOLOv8n-pose Detection", cv::WINDOW_NORMAL);
     cv::resizeWindow("YOLOv8n-pose Detection", 960, 540);
@@ -345,14 +366,38 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Draw aim target if enabled
+            if (g_aim_enabled && g_aim_system && g_aim_system->hasTarget()) {
+                auto target = g_aim_system->getTarget();
+                cv::Point2f target_pos = target.pos;
+                
+                // Draw crosshair
+                cv::circle(display_img, target_pos, 8, cv::Scalar(0, 255, 255), 2);
+                cv::line(display_img, cv::Point(target_pos.x - 12, target_pos.y), 
+                        cv::Point(target_pos.x + 12, target_pos.y), cv::Scalar(0, 255, 255), 2);
+                cv::line(display_img, cv::Point(target_pos.x, target_pos.y - 12), 
+                        cv::Point(target_pos.x, target_pos.y + 12), cv::Scalar(0, 255, 255), 2);
+                
+                // Draw target info
+                char aim_text[128];
+                const char* part_name = (target.body_part == aim::HEAD) ? "HEAD" :
+                                       (target.body_part == aim::NECK) ? "NECK" :
+                                       (target.body_part == aim::CHEST) ? "CHEST" : "BELLY";
+                snprintf(aim_text, sizeof(aim_text), "AIM: %s %.1fm %.0f%%", 
+                        part_name, target.distance_estimate, target.hit_probability * 100);
+                cv::putText(display_img, aim_text, cv::Point(10, 60),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+            }
+
             char info_text[256];
             float total_ms_so_far = duration<float>(high_resolution_clock::now() - t0).count() * 1000.0f;
             snprintf(info_text, sizeof(info_text), 
-                    "Cap:%.0f Pre:%.0f NPU:%.0f | %.0fms %.0fFPS",
+                    "Cap:%.0f Pre:%.0f NPU:%.0f | %.0fms %.0fFPS %s",
                     display_frame.capture_time,
                     display_frame.preprocess_time,
                     display_frame.npu_time,
-                    total_ms_so_far, 1000.0f / total_ms_so_far);
+                    total_ms_so_far, 1000.0f / total_ms_so_far,
+                    g_aim_enabled ? "[AIM ON]" : "");
             cv::putText(display_img, info_text, cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
             
@@ -378,6 +423,78 @@ int main(int argc, char** argv) {
         int key = cv::waitKey(1);
         if (key == 'q' || key == 27) {
             break;
+        } else if (key == 'z') {
+            g_aim_enabled = !g_aim_enabled;
+            if (g_aim_system) {
+                g_aim_system->setEnabled(g_aim_enabled);
+            }
+            printf("Aim assist: %s\n", g_aim_enabled ? "ON" : "OFF");
+        } else if (key == '1') {
+            g_aim_preset = aim::AimPreset::LEGIT;
+            if (g_aim_system) {
+                g_aim_system->setPreset(g_aim_preset);
+                printf("Preset: LEGIT (human-like)\n");
+            }
+        } else if (key == '2') {
+            g_aim_preset = aim::AimPreset::SEMI_RAGE;
+            if (g_aim_system) {
+                g_aim_system->setPreset(g_aim_preset);
+                printf("Preset: SEMI_RAGE\n");
+            }
+        } else if (key == '3') {
+            g_aim_preset = aim::AimPreset::RAGE;
+            if (g_aim_system) {
+                g_aim_system->setPreset(g_aim_preset);
+                printf("Preset: RAGE\n");
+            }
+        } else if (key == '+' || key == '=') {
+            if (g_aim_system) {
+                float sens = g_aim_system->getSensitivity();
+                g_aim_system->setSensitivity(sens + 0.1f);
+                printf("Sensitivity: %.1f\n", g_aim_system->getSensitivity());
+            }
+        } else if (key == '-') {
+            if (g_aim_system) {
+                float sens = g_aim_system->getSensitivity();
+                g_aim_system->setSensitivity(std::max(0.1f, sens - 0.1f));
+                printf("Sensitivity: %.1f\n", g_aim_system->getSensitivity());
+            }
+        } else if (key == 'm') {
+            if (g_aim_system) {
+                bool absolute = !g_aim_system->isAbsoluteMode();
+                g_aim_system->setAbsoluteMode(absolute);
+                printf("Mode: %s\n", absolute ? "ABSOLUTE (move to target)" : "RELATIVE (spring-damper)");
+            }
+        }
+        
+        // Update aim system with current detections
+        if (g_aim_system && !display_frame.detections.empty()) {
+            g_aim_system->update(display_frame.detections, width, height);
+            
+            // Execute aim if enabled
+            if (g_aim_enabled) {
+                // 使用绝对定位模式：直接移动到目标
+                if (g_aim_system->isAbsoluteMode()) {
+                    if (g_aim_system->moveToTarget(width, height)) {
+                        auto target = g_aim_system->getTarget();
+                        printf("[AIM] Target: %s (%.0f, %.0f) offset=(%.1f, %.1f)\n",
+                               target.body_part == aim::HEAD ? "HEAD" :
+                               target.body_part == aim::NECK ? "NECK" :
+                               target.body_part == aim::CHEST ? "CHEST" : "BELLY",
+                               target.pos.x, target.pos.y,
+                               target.pos.x - width/2.0f, target.pos.y - height/2.0f);
+                    }
+                } else {
+                    // 相对移动模式（弹簧-阻尼）
+                    float dt = 1.0f / 60.0f;  // Assume 60Hz
+                    cv::Point2f delta = g_aim_system->execute(dt);
+                    
+                    // Print aim info for debugging
+                    if (std::abs(delta.x) > 0.1f || std::abs(delta.y) > 0.1f) {
+                        printf("[AIM] dx=%.1f dy=%.1f\n", delta.x, delta.y);
+                    }
+                }
+            }
         }
         
         // Print stats every 2 seconds
@@ -417,6 +534,12 @@ int main(int argc, char** argv) {
     hdmi_stop(&cap);
     hdmi_close(&cap);
     cv::destroyAllWindows();
+    
+    // Cleanup aim system
+    if (g_aim_system) {
+        delete g_aim_system;
+        g_aim_system = nullptr;
+    }
 
     printf("Done\n");
     return 0;

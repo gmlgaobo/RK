@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // USB HID mouse report structure
 // Relative movement mouse: buttons + dx + dy + scroll wheel
 typedef struct {
@@ -27,5 +31,9 @@ int usb_hid_mouse_move(int8_t dx, int8_t dy, uint8_t buttons);
 
 // Check if device is initialized and ready
 bool usb_hid_mouse_ready(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

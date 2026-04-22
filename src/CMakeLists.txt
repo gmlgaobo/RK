@@ -35,7 +35,7 @@ endif()
 # Remove this line after verifying the model works with OpenCV preprocessing
 add_definitions(-DFORCE_OPENCV_PREPROCESS)
 
-add_executable(pose_demo hdmi_capture.c rga_preprocess.c yolo_inference.cpp pose_demo.cpp)
+add_executable(pose_demo hdmi_capture.c rga_preprocess.c usb_hid.c yolo_inference.cpp aim_engine.cpp hid_controller.cpp pose_demo.cpp)
 if(RGA_LIB)
     target_link_libraries(pose_demo pthread ${OpenCV_LIBS} rknn_api rga)
 else()
