@@ -103,7 +103,9 @@ int YoloPoseInference::init(const char* model_path, int input_width, int input_h
         return -1;
     }
 
-    (void)fread(model_buffer, 1, model_size, fp);
+    if (fread(model_buffer, 1, model_size, fp) != model_size) {
+        fprintf(stderr, "Warning: Failed to read full model file\n");
+    }
     fclose(fp);
 
     rknn_context ctx;
@@ -356,40 +358,23 @@ static std::vector<PoseDetection> run_inference_postprocess(
     
     bool is_nchw = (output_dims[1] == 56 && output_dims[2] == 8400);
     
-    // Debug: print first few raw output values
-    printf("[DEBUG] Output type=%d, is_nchw=%d, output.size=%u\n", output_type, is_nchw, output.size);
-    printf("[DEBUG] Channel 0-7 values at index 0: ");
-    for (int c = 0; c < 8; c++) {
-        printf("ch%d=%.3f ", c, get_value(c * num_detections + 0));
-    }
-    printf("\n");
-    printf("[DEBUG] First 10 values (channel 0, cx): ");
-    for (int i = 0; i < 10 && i < num_detections; i++) {
-        printf("%.3f ", get_value(i));
-    }
-    printf("\n");
-    printf("[DEBUG] First 10 values (channel 4, score): ");
-    for (int i = 0; i < 10 && i < num_detections; i++) {
-        printf("%.3f ", get_value(4 * num_detections + i));
-    }
-    printf("\n");
-    printf("[DEBUG] First 10 values (channel 5, keypoint x): ");
-    for (int i = 0; i < 10 && i < num_detections; i++) {
-        printf("%.3f ", get_value(5 * num_detections + i));
-    }
-    printf("\n");
+    // Debug: print first few raw output values (disabled for production)
+    // printf("[DEBUG] Output type=%d, is_nchw=%d, output.size=%u\n", output_type, is_nchw, output.size);
+    // printf("[DEBUG] Channel 0-7 values at index 0: ");
+    // for (int c = 0; c < 8; c++) {
+    //     printf("ch%d=%.3f ", c, get_value(c * num_detections + 0));
+    // }
+    // printf("\n");
     
     // Find max score across ALL detections
     float max_score = 0;
-    int max_idx = -1;
     for (int i = 0; i < num_detections; i++) {
         float score = get_value(4 * num_detections + i);
         if (score > max_score) {
             max_score = score;
-            max_idx = i;
         }
     }
-    printf("[DEBUG] Max score: %.3f at index %d\n", max_score, max_idx);
+    // printf("[DEBUG] Max score: %.3f at index %d\n", max_score, max_idx);
     
     // Print some statistics about the scores
     int count_0 = 0, count_1 = 0, count_10 = 0, count_50 = 0, count_100 = 0;
@@ -401,7 +386,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
         else if (score < 50.0f) count_50++;
         else count_100++;
     }
-    printf("[DEBUG] Score stats: <0.001=%d, <1=%d, <10=%d, <50=%d, >=50=%d\n", count_0, count_1, count_10, count_50, count_100);
+    // printf("[DEBUG] Score stats: <0.001=%d, <1=%d, <10=%d, <50=%d, >=50=%d\n", count_0, count_1, count_10, count_50, count_100);
     
     for (int i = 0; i < num_detections; i++) {
         float cx, cy, w, h, score;
@@ -457,19 +442,12 @@ static std::vector<PoseDetection> run_inference_postprocess(
         candidates.push_back(det);
     }
     
-    // Debug: print first detection coordinates
-    if (!candidates.empty()) {
-        const auto& det = candidates[0];
-        printf("[DEBUG] Detection: bbox=(%.1f,%.1f,%.1f,%.1f) score=%.3f\n", 
-               det.x, det.y, det.w, det.h, det.score);
-        printf("[DEBUG] Keypoints: nose=(%.1f,%.1f,%.3f) left_eye=(%.1f,%.1f,%.3f) right_eye=(%.1f,%.1f,%.3f)\n",
-               det.kp[0][0], det.kp[0][1], det.kp_score[0],
-               det.kp[1][0], det.kp[1][1], det.kp_score[1],
-               det.kp[2][0], det.kp[2][1], det.kp_score[2]);
-        printf("[DEBUG] Keypoints: left_shoulder=(%.1f,%.1f,%.3f) right_shoulder=(%.1f,%.1f,%.3f)\n",
-               det.kp[5][0], det.kp[5][1], det.kp_score[5],
-               det.kp[6][0], det.kp[6][1], det.kp_score[6]);
-    }
+    // Debug: print first detection coordinates (disabled for production)
+    // if (!candidates.empty()) {
+    //     const auto& det = candidates[0];
+    //     printf("[DEBUG] Detection: bbox=(%.1f,%.1f,%.1f,%.1f) score=%.3f\n", 
+    //            det.x, det.y, det.w, det.h, det.score);
+    // }
 
     // Count score distribution
     int count_09 = 0, count_05 = 0, count_01 = 0, count_001 = 0;
@@ -479,7 +457,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
         if (c.score > 0.1f) count_01++;
         if (c.score > 0.01f) count_001++;
     }
-    printf("[DEBUG] Score distribution: >0.9=%d, >0.5=%d, >0.1=%d, >0.01=%d\n", count_09, count_05, count_01, count_001);
+    // printf("[DEBUG] Score distribution: >0.9=%d, >0.5=%d, >0.1=%d, >0.01=%d\n", count_09, count_05, count_01, count_001);
     
     std::vector<PoseDetection> nms_result;
     if (!candidates.empty()) {
@@ -487,7 +465,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
         nms(candidates, nms_result, 0.45f);
     }
     
-    printf("[DEBUG] Candidates: %zu, After NMS: %zu\n", candidates.size(), nms_result.size());
+    // printf("[DEBUG] Candidates: %zu, After NMS: %zu\n", candidates.size(), nms_result.size());
     
     auto t3 = high_resolution_clock::now();
     if (timing) {

@@ -35,9 +35,28 @@ endif()
 # Remove this line after verifying the model works with OpenCV preprocessing
 add_definitions(-DFORCE_OPENCV_PREPROCESS)
 
-add_executable(pose_demo hdmi_capture.c rga_preprocess.c usb_hid.c yolo_inference.cpp aim_engine.cpp hid_controller.cpp pose_demo.cpp)
+add_executable(pose_demo hdmi_capture.c rga_preprocess.c usb_hid.c yolo_inference.cpp aim_engine.cpp hid_controller.cpp hid_relay.cpp pose_demo.cpp)
 if(RGA_LIB)
     target_link_libraries(pose_demo pthread ${OpenCV_LIBS} rknn_api rga)
 else()
     target_link_libraries(pose_demo pthread ${OpenCV_LIBS} rknn_api)
 endif()
+
+# Copy config file and all yolo*.rknn models to build directory
+add_custom_command(TARGET pose_demo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_SOURCE_DIR}/config.ini
+        $<TARGET_FILE_DIR:pose_demo>/config.ini
+    COMMENT "Copying config.ini to build directory"
+)
+
+file(GLOB YOLO_MODELS "${CMAKE_SOURCE_DIR}/src/yolo*.rknn")
+foreach(model ${YOLO_MODELS})
+    get_filename_component(model_name ${model} NAME)
+    add_custom_command(TARGET pose_demo POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${model}
+            $<TARGET_FILE_DIR:pose_demo>/${model_name}
+        COMMENT "Copying ${model_name} to build directory"
+    )
+endforeach()

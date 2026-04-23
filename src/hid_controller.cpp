@@ -101,22 +101,24 @@ AimSystem::~AimSystem() {
 bool AimSystem::init(aim::AimPreset preset) {
     if (initialized_) return true;
     
-    // 初始化吸附引擎
+    // 初始化吸附引擎（始终初始化，即使没有 HID 权限）
     aim_config_ = aim::getPreset(preset);
     aim_engine_ = new aim::AimEngine(aim_config_);
     
     // 初始化 HID 控制器
     hid_controller_ = new HIDController(hid_config_);
     if (!hid_controller_->init()) {
-        delete aim_engine_;
-        aim_engine_ = nullptr;
+        // HID 初始化失败，仅使用视觉辅助模式
         delete hid_controller_;
         hid_controller_ = nullptr;
-        return false;
+        printf("[AIM] HID init failed - running in visual-only mode\n");
+    } else {
+        printf("[AIM] HID controller initialized\n");
     }
     
     initialized_ = true;
-    enabled_ = true;  // 默认开启
+    enabled_ = true;   // 默认开启吸附
+    printf("[AIM] AimSystem initialized (enabled by default)\n");
     return true;
 }
 

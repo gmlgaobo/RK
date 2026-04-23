@@ -14,6 +14,8 @@
 #include "hdmi_capture.h"
 #include "yolo_inference.h"
 #include "hid_controller.h"
+#include "hid_relay.h"
+#include "usb_hid.h"
 #include <opencv2/opencv.hpp>
 #include <sys/time.h>
 #include <unistd.h>
@@ -132,8 +134,66 @@ std::atomic<size_t> total_dropped_frames{0};
 
 // Aim system (integrates aim engine + HID controller)
 hid::AimSystem* g_aim_system = nullptr;
-bool g_aim_enabled = true;  // 默认开启
+hid::HIDRelay* g_hid_relay = nullptr;
+bool g_aim_enabled = true;   // 默认开启吸附
+bool g_auto_fire = false;    // F4 控制自动开枪模式
 aim::AimPreset g_aim_preset = aim::AimPreset::LEGIT;
+std::vector<PoseDetection> g_latest_detections; // 保存最新的检测结果
+
+static int parse_key_name(const char* name) {
+    if (!name) return 0;
+    if (strcmp(name, "F1") == 0) return 59;
+    if (strcmp(name, "F2") == 0) return 60;
+    if (strcmp(name, "F3") == 0) return 61;
+    if (strcmp(name, "F4") == 0) return 62;
+    if (strcmp(name, "F5") == 0) return 63;
+    if (strcmp(name, "F6") == 0) return 64;
+    if (strcmp(name, "F7") == 0) return 65;
+    if (strcmp(name, "F8") == 0) return 66;
+    if (strcmp(name, "F9") == 0) return 67;
+    if (strcmp(name, "F10") == 0) return 68;
+    if (strcmp(name, "F11") == 0) return 87;
+    if (strcmp(name, "F12") == 0) return 88;
+    return 0;
+ }
+
+ static std::string trim(const std::string& s) {
+     size_t start = s.find_first_not_of(" \t\r\n");
+     if (start == std::string::npos) return "";
+     size_t end = s.find_last_not_of(" \t\r\n");
+     return s.substr(start, end - start + 1);
+ }
+
+ static const char* key_code_to_name(int code) {
+     switch(code) {
+         case 59: return "F1";
+         case 60: return "F2";
+         case 61: return "F3";
+         case 62: return "F4";
+         case 63: return "F5";
+         case 64: return "F6";
+         case 65: return "F7";
+         case 66: return "F8";
+         case 67: return "F9";
+         case 68: return "F10";
+         case 87: return "F11";
+         case 88: return "F12";
+         default: return "?";
+     }
+ }
+
+// 模式 B: 完整转发配置（设置为空表示禁用转发）
+const char* g_keyboard_device = nullptr;  // "/dev/input/event0"
+const char* g_mouse_device = nullptr;     // "/dev/input/event1"
+
+int g_key_legit = 59;        // F1
+int g_key_semirage = 60;     // F2
+int g_key_rage = 61;         // F3
+int g_key_autofire = 62;     // F4
+int g_key_mode = 63;         // F5
+int g_key_sens_up = 64;      // F6
+int g_key_sens_down = 65;     // F7
+int g_key_game_mode = 67;    // F9
 
 // Preprocess thread: BGR -> RGB letterbox using fast_letterbox (with RGA support)
 void preprocess_thread(int input_w, int input_h) {
@@ -152,32 +212,15 @@ void preprocess_thread(int input_w, int input_h) {
         // This ensures consistent preprocessing between pipeline and direct inference
         fast_letterbox(frame.frame, preprocessed.data, input_w, input_h, scale, pad_left, pad_top);
         
-        // DEBUG: Save preprocessed image to check if preprocessing is correct
-        static int debug_count = 0;
-        if (debug_count < 5) {
-            cv::Mat debug_img(input_h, input_w, CV_8UC3, preprocessed.data);
-            char debug_path[256];
-            snprintf(debug_path, sizeof(debug_path), "/tmp/preprocess_debug_%d.jpg", debug_count++);
-            cv::imwrite(debug_path, debug_img);
-            printf("[DEBUG] Saved preprocessed image to %s\n", debug_path);
-            
-            // Print first 10 pixels of preprocessed image to verify data
-            printf("[DEBUG] First 10 pixels (RGB): ");
-            for (int i = 0; i < 10 && i < input_w * input_h; i++) {
-                int y = i / input_w;
-                int x = i % input_w;
-                uint8_t* pixel = preprocessed.data + (y * input_w + x) * 3;
-                printf("(%d,%d,%d) ", pixel[0], pixel[1], pixel[2]);
-            }
-            printf("\n");
-            
-            // Print pixel at center (should be part of the image, not gray border)
-            int center_y = input_h / 2;
-            int center_x = input_w / 2;
-            uint8_t* center_pixel = preprocessed.data + (center_y * input_w + center_x) * 3;
-            printf("[DEBUG] Center pixel at (%d,%d): RGB=(%d,%d,%d)\n", 
-                   center_x, center_y, center_pixel[0], center_pixel[1], center_pixel[2]);
-        }
+        // DEBUG: Save preprocessed image to check if preprocessing is correct (disabled)
+        // static int debug_count = 0;
+        // if (debug_count < 5) {
+        //     cv::Mat debug_img(input_h, input_w, CV_8UC3, preprocessed.data);
+        //     char debug_path[256];
+        //     snprintf(debug_path, sizeof(debug_path), "/tmp/preprocess_debug_%d.jpg", debug_count++);
+        //     cv::imwrite(debug_path, debug_img);
+        //     printf("[DEBUG] Saved preprocessed image to %s\n", debug_path);
+        // }
         
         frame.preprocessed = preprocessed.clone();  // Clone to own the data
         frame.scale = scale;
@@ -226,17 +269,133 @@ int main(int argc, char** argv) {
     const char* device = "/dev/video40";
     int width = 1920;
     int height = 1080;
-    const char* model_path = "yolov8n-pose.rknn";
 
-    if (argc >= 2) {
-        device = argv[1];
+    std::string exe_dir = "";
+    if (argc > 0 && argv[0]) {
+        std::string exe_path = argv[0];
+        size_t pos = exe_path.rfind('/');
+        if (pos != std::string::npos) {
+            exe_dir = exe_path.substr(0, pos + 1);
+        }
     }
-    if (argc == 3) {
-        model_path = argv[2];
-    } else if (argc >= 4) {
-        width = atoi(argv[2]);
-        height = atoi(argv[3]);
-        model_path = argv[4];
+
+    std::vector<std::string> model_paths = {
+        "/home/ztl/github/RK/src/yolov8n-pose.rknn",
+        exe_dir + "yolov8n-pose.rknn",
+        "yolov8n-pose.rknn",
+    };
+    const char* model_path = model_paths[0].c_str();
+
+    // Parse --config option first
+    const char* config_file = nullptr;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            config_file = argv[++i];
+            break;
+        }
+    }
+
+    // If config file specified, load it
+    if (config_file) {
+        FILE* fp = fopen(config_file, "r");
+        if (fp) {
+            fclose(fp);
+            char line[256];
+            fp = fopen(config_file, "r");
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "model = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) {
+                        char* path = eq + 1;
+                        while (*path == ' ') path++;
+                        path[strlen(path)-1] = '\0';
+                        model_paths.insert(model_paths.begin(), path);
+                    }
+                }
+                if (strstr(line, "device = ") && !strstr(line, "keyboard") && !strstr(line, "mouse")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) {
+                        char* path = eq + 1;
+                        while (*path == ' ') path++;
+                        path[strlen(path)-1] = '\0';
+                        device = strdup(path);
+                    }
+                }
+                // 解析按键映射
+                if (strstr(line, "key_legit = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_legit = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_semirage = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_semirage = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_rage = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_rage = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_autofire = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_autofire = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_mode = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_mode = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_sens_up = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_sens_up = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_sens_down = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_sens_down = parse_key_name(trim(eq+1).c_str()); }
+                }
+                if (strstr(line, "key_game_mode = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) { g_key_game_mode = parse_key_name(trim(eq+1).c_str()); }
+                }
+            }
+            fclose(fp);
+            printf("Loaded config from: %s\n", config_file);
+        } else {
+            fprintf(stderr, "Warning: Cannot open config file: %s\n", config_file);
+        }
+    }
+
+    // Parse positional arguments
+    std::vector<char*> positional_args;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--config") == 0) {
+            i++; // skip value
+        } else if (argv[i][0] != '-') {
+            positional_args.push_back(argv[i]);
+        }
+    }
+    
+    if (positional_args.size() >= 1) {
+        device = positional_args[0];
+    }
+    if (positional_args.size() == 3) {
+        width = atoi(positional_args[1]);
+        height = atoi(positional_args[2]);
+    } else if (positional_args.size() == 2) {
+        if (isdigit(positional_args[0][0])) {
+            width = atoi(positional_args[0]);
+            height = atoi(positional_args[1]);
+        }
+    } else if (positional_args.size() >= 4) {
+        width = atoi(positional_args[1]);
+        height = atoi(positional_args[2]);
+        model_path = positional_args[3];
+    }
+    
+    // Parse optional keyboard/mouse device arguments (mode B)
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--keyboard") == 0 && i + 1 < argc) {
+            g_keyboard_device = argv[++i];
+        } else if (strcmp(argv[i], "--mouse") == 0 && i + 1 < argc) {
+            g_mouse_device = argv[++i];
+        }
     }
 
     printf("\n");
@@ -246,6 +405,8 @@ int main(int argc, char** argv) {
     printf("Device: %s\n", device);
     printf("Resolution: %dx%d\n", width, height);
     printf("Model: %s\n", model_path);
+    if (g_keyboard_device) printf("Keyboard: %s\n", g_keyboard_device);
+    if (g_mouse_device) printf("Mouse: %s\n", g_mouse_device);
     printf("=======================================\n");
     printf("\n");
 
@@ -262,7 +423,15 @@ int main(int argc, char** argv) {
     }
 
     YoloPoseInference inference;
-    if (inference.init(model_path) != 0) {
+    const char* loaded_model = nullptr;
+    for (const auto& path : model_paths) {
+        if (inference.init(path.c_str()) == 0) {
+            loaded_model = path.c_str();
+            model_path = loaded_model;
+            break;
+        }
+    }
+    if (!loaded_model) {
         fprintf(stderr, "Failed to initialize YOLO model: %s\n", model_path);
         hdmi_stop(&cap);
         hdmi_close(&cap);
@@ -277,10 +446,15 @@ int main(int argc, char** argv) {
     printf("Streaming started, opening preview window...\n");
     printf("Controls:\n");
     printf("  'q' or ESC - Quit\n");
-    printf("  'a' - Toggle aim assist\n");
-    printf("  '1' - Legit preset (human-like)\n");
-    printf("  '2' - Semi-rage preset\n");
-    printf("  '3' - Rage preset\n");
+    printf("\n");
+    printf("=== 模式 B: 键盘鼠标转发 (按 %s 开启游戏模式) ===\n", key_code_to_name(g_key_game_mode));
+    printf("  %s - Legit预设\n", key_code_to_name(g_key_legit));
+    printf("  %s - Semi-rage预设\n", key_code_to_name(g_key_semirage));
+    printf("  %s - Rage预设\n", key_code_to_name(g_key_rage));
+    printf("  %s - 自动开枪模式开关\n", key_code_to_name(g_key_autofire));
+    printf("  %s - 切换绝对/相对模式\n", key_code_to_name(g_key_mode));
+    printf("  %s - 增加灵敏度\n", key_code_to_name(g_key_sens_up));
+    printf("  %s - 降低灵敏度\n", key_code_to_name(g_key_sens_down));
     printf("\n");
     
     // Initialize aim system (engine + HID controller)
@@ -289,7 +463,37 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Warning: Failed to initialize HID controller. Aim assist will be visual only.\n");
         fprintf(stderr, "To enable HID control, run as root or configure udev rules.\n");
     } else {
-        printf("Aim system initialized. Press 'a' to toggle aim assist.\n");
+        g_aim_system->setEnabled(g_aim_enabled);
+        printf("Aim system initialized. Aim is: %s (Auto-fire: %s)\n", 
+               g_aim_enabled ? "ON" : "OFF", g_auto_fire ? "ON" : "OFF");
+        printf("Press %s to toggle auto-fire mode (requires %s game mode).\n",
+               key_code_to_name(g_key_autofire), key_code_to_name(g_key_game_mode));
+    }
+    
+    // Initialize HID relay (mode B: full keyboard/mouse forwarding)
+    if (g_keyboard_device || g_mouse_device) {
+        printf("\n=== 模式 B: 完整键盘鼠标转发 ===\n");
+        hid::RelayConfig relay_cfg;
+        relay_cfg.keyboard_device = g_keyboard_device;
+        relay_cfg.mouse_device = g_mouse_device;
+        relay_cfg.preset_legit_key = g_key_legit;
+        relay_cfg.preset_semirage_key = g_key_semirage;
+        relay_cfg.preset_rage_key = g_key_rage;
+        relay_cfg.toggle_aim_key = g_key_autofire;
+        relay_cfg.toggle_mode_key = g_key_mode;
+        relay_cfg.sens_up_key = g_key_sens_up;
+        relay_cfg.sens_down_key = g_key_sens_down;
+        relay_cfg.toggle_game_mode_key = g_key_game_mode;
+        
+        g_hid_relay = new hid::HIDRelay(relay_cfg);
+        if (g_hid_relay->init(g_aim_system)) {
+            g_hid_relay->start();
+            printf("HID relay started.\n");
+        } else {
+            fprintf(stderr, "Warning: Failed to initialize HID relay.\n");
+            delete g_hid_relay;
+            g_hid_relay = nullptr;
+        }
     }
 
     cv::namedWindow("YOLOv8n-pose Detection", cv::WINDOW_NORMAL);
@@ -335,6 +539,9 @@ int main(int argc, char** argv) {
         // Try to get processed frames from display queue (non-blocking)
         PipelineFrame display_frame;
         while (display_queue.pop(display_frame, 0)) {
+            // Save latest detections for aim system
+            g_latest_detections = display_frame.detections;
+            
             auto t2 = high_resolution_clock::now();
             
             // Draw detections
@@ -366,27 +573,39 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Draw aim target if enabled
-            if (g_aim_enabled && g_aim_system && g_aim_system->hasTarget()) {
+            // Draw aim target (always show when has target, regardless of aim_enabled)
+            static int draw_count = 0;
+            if (g_aim_system && g_aim_system->hasTarget()) {
                 auto target = g_aim_system->getTarget();
                 cv::Point2f target_pos = target.pos;
-                
-                // Draw crosshair
-                cv::circle(display_img, target_pos, 8, cv::Scalar(0, 255, 255), 2);
-                cv::line(display_img, cv::Point(target_pos.x - 12, target_pos.y), 
-                        cv::Point(target_pos.x + 12, target_pos.y), cv::Scalar(0, 255, 255), 2);
-                cv::line(display_img, cv::Point(target_pos.x, target_pos.y - 12), 
-                        cv::Point(target_pos.x, target_pos.y + 12), cv::Scalar(0, 255, 255), 2);
-                
-                // Draw target info
-                char aim_text[128];
-                const char* part_name = (target.body_part == aim::HEAD) ? "HEAD" :
-                                       (target.body_part == aim::NECK) ? "NECK" :
-                                       (target.body_part == aim::CHEST) ? "CHEST" : "BELLY";
-                snprintf(aim_text, sizeof(aim_text), "AIM: %s %.1fm %.0f%%", 
-                        part_name, target.distance_estimate, target.hit_probability * 100);
-                cv::putText(display_img, aim_text, cv::Point(10, 60),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+
+                // Debug: print target position occasionally
+                if (++draw_count % 60 == 0) {
+                    printf("[DRAW] Target at (%.0f, %.0f), img size: %dx%d\n",
+                           target_pos.x, target_pos.y, display_img.cols, display_img.rows);
+                }
+
+                // Ensure target is within image bounds
+                if (target_pos.x >= 0 && target_pos.x < display_img.cols &&
+                    target_pos.y >= 0 && target_pos.y < display_img.rows) {
+                    // Draw RED crosshair (more visible)
+                    cv::Scalar crosshair_color(0, 0, 255);  // Red in BGR
+                    cv::circle(display_img, target_pos, 20, crosshair_color, 5);
+                    cv::line(display_img, cv::Point(target_pos.x - 25, target_pos.y),
+                            cv::Point(target_pos.x + 25, target_pos.y), crosshair_color, 5);
+                    cv::line(display_img, cv::Point(target_pos.x, target_pos.y - 25),
+                            cv::Point(target_pos.x, target_pos.y + 25), crosshair_color, 5);
+
+                    // Draw target info with red color
+                    char aim_text[128];
+                    const char* part_name = (target.body_part == aim::HEAD) ? "HEAD" :
+                                           (target.body_part == aim::NECK) ? "NECK" :
+                                           (target.body_part == aim::CHEST) ? "CHEST" : "BELLY";
+                    snprintf(aim_text, sizeof(aim_text), "AIM: %s (%.0f,%.0f) %.0f%%",
+                            part_name, target_pos.x, target_pos.y, target.hit_probability * 100);
+                    cv::putText(display_img, aim_text, cv::Point(10, 60),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, crosshair_color, 3, cv::LINE_AA);
+                }
             }
 
             char info_text[256];
@@ -423,95 +642,17 @@ int main(int argc, char** argv) {
         int key = cv::waitKey(1);
         if (key == 'q' || key == 27) {
             break;
-        } else if (key == 'z') {
-            g_aim_enabled = !g_aim_enabled;
-            if (g_aim_system) {
-                g_aim_system->setEnabled(g_aim_enabled);
-            }
-            printf("Aim assist: %s\n", g_aim_enabled ? "ON" : "OFF");
-        } else if (key == '1') {
-            g_aim_preset = aim::AimPreset::LEGIT;
-            if (g_aim_system) {
-                g_aim_system->setPreset(g_aim_preset);
-                printf("Preset: LEGIT (human-like)\n");
-            }
-        } else if (key == '2') {
-            g_aim_preset = aim::AimPreset::SEMI_RAGE;
-            if (g_aim_system) {
-                g_aim_system->setPreset(g_aim_preset);
-                printf("Preset: SEMI_RAGE\n");
-            }
-        } else if (key == '3') {
-            g_aim_preset = aim::AimPreset::RAGE;
-            if (g_aim_system) {
-                g_aim_system->setPreset(g_aim_preset);
-                printf("Preset: RAGE\n");
-            }
-        } else if (key == '+' || key == '=') {
-            if (g_aim_system) {
-                float sens = g_aim_system->getSensitivity();
-                g_aim_system->setSensitivity(sens + 0.1f);
-                printf("Sensitivity: %.1f\n", g_aim_system->getSensitivity());
-            }
-        } else if (key == '-') {
-            if (g_aim_system) {
-                float sens = g_aim_system->getSensitivity();
-                g_aim_system->setSensitivity(std::max(0.1f, sens - 0.1f));
-                printf("Sensitivity: %.1f\n", g_aim_system->getSensitivity());
-            }
-        } else if (key == 'm') {
-            if (g_aim_system) {
-                bool absolute = !g_aim_system->isAbsoluteMode();
-                g_aim_system->setAbsoluteMode(absolute);
-                printf("Mode: %s\n", absolute ? "ABSOLUTE (move to target)" : "RELATIVE (spring-damper)");
-            }
         }
         
-        // Update aim system with current detections
-        if (g_aim_system && !display_frame.detections.empty()) {
-            g_aim_system->update(display_frame.detections, width, height);
-            
-            // Execute aim if enabled
-            if (g_aim_enabled) {
-                // 使用绝对定位模式：直接移动到目标
-                if (g_aim_system->isAbsoluteMode()) {
-                    if (g_aim_system->moveToTarget(width, height)) {
-                        auto target = g_aim_system->getTarget();
-                        printf("[AIM] Target: %s (%.0f, %.0f) offset=(%.1f, %.1f)\n",
-                               target.body_part == aim::HEAD ? "HEAD" :
-                               target.body_part == aim::NECK ? "NECK" :
-                               target.body_part == aim::CHEST ? "CHEST" : "BELLY",
-                               target.pos.x, target.pos.y,
-                               target.pos.x - width/2.0f, target.pos.y - height/2.0f);
-                    }
-                } else {
-                    // 相对移动模式（弹簧-阻尼）
-                    float dt = 1.0f / 60.0f;  // Assume 60Hz
-                    cv::Point2f delta = g_aim_system->execute(dt);
-                    
-                    // Print aim info for debugging
-                    if (std::abs(delta.x) > 0.1f || std::abs(delta.y) > 0.1f) {
-                        printf("[AIM] dx=%.1f dy=%.1f\n", delta.x, delta.y);
-                    }
-                }
-            }
+        // Update aim system with current detections（仅用于检测）
+        if (g_aim_system && !g_latest_detections.empty()) {
+            g_aim_system->update(g_latest_detections, width, height);
         }
         
-        // Print stats every 2 seconds
+        // Print stats every 10 seconds (disabled for clean output)
         double elapsed = get_time_ms() - start_time;
-        if (elapsed >= 2000.0 && frame_count > 0) {
-            printf("=== Pipeline Avg (last %d frames) ===\n", frame_count);
-            printf("Capture:  %.1fms\n", total_capture / frame_count);
-            printf("Preproc:  %.1fms (parallel)\n", total_preprocess / frame_count);
-            printf("NPU:      %.1fms (parallel)\n", total_npu / frame_count);
-            printf("Draw:     %.1fms\n", total_draw / frame_count);
-            printf("Total:    %.1fms (%.1f FPS)\n", 
-                   total_all / frame_count, 
-                   1000.0f * frame_count / elapsed);
-            printf("Queue: pre=%zu npu=%zu disp=%zu dropped=%zu\n",
-                   preprocess_queue.size(), npu_queue.size(), display_queue.size(),
-                   preprocess_queue.dropped() + npu_queue.dropped() + display_queue.dropped());
-            printf("=====================================\n\n");
+        if (elapsed >= 10000.0 && frame_count > 0) {
+            // printf("FPS: %.1f\n", 1000.0f * frame_count / elapsed);
             
             frame_count = 0;
             total_capture = 0;
@@ -536,6 +677,11 @@ int main(int argc, char** argv) {
     cv::destroyAllWindows();
     
     // Cleanup aim system
+    if (g_hid_relay) {
+        g_hid_relay->stop();
+        delete g_hid_relay;
+        g_hid_relay = nullptr;
+    }
     if (g_aim_system) {
         delete g_aim_system;
         g_aim_system = nullptr;
