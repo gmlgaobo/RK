@@ -362,11 +362,15 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Parse positional arguments
+    // Parse positional arguments and optional keyboard/mouse arguments
     std::vector<char*> positional_args;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0) {
             i++; // skip value
+        } else if (strcmp(argv[i], "--keyboard") == 0 && i + 1 < argc) {
+            g_keyboard_device = argv[++i];
+        } else if (strcmp(argv[i], "--mouse") == 0 && i + 1 < argc) {
+            g_mouse_device = argv[++i];
         } else if (argv[i][0] != '-') {
             positional_args.push_back(argv[i]);
         }
@@ -387,15 +391,6 @@ int main(int argc, char** argv) {
         width = atoi(positional_args[1]);
         height = atoi(positional_args[2]);
         model_path = positional_args[3];
-    }
-    
-    // Parse optional keyboard/mouse device arguments (mode B)
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--keyboard") == 0 && i + 1 < argc) {
-            g_keyboard_device = argv[++i];
-        } else if (strcmp(argv[i], "--mouse") == 0 && i + 1 < argc) {
-            g_mouse_device = argv[++i];
-        }
     }
 
     printf("\n");

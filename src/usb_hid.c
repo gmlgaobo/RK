@@ -38,21 +38,46 @@ int usb_hid_mouse_send(const hid_mouse_report_t* report) {
     if (!mouse_initialized || hidg0_fd < 0) {
         return -1;
     }
-    ssize_t n = write(hidg0_fd, report, sizeof(*report));
-    if (n != sizeof(*report)) {
-        // Try to reopen device if write failed
-        static int err_count = 0;
-        if (++err_count % 100 == 0) {
-            perror("[HID] mouse write failed");
-            // Try to reopen
+    
+    // 检查 OTG 连接状态
+    static bool last_otg_state = false;
+    bool current_otg_state = usb_hid_otg_connected();
+    
+    // 如果 OTG 状态变化，立即重连
+    if (current_otg_state != last_otg_state) {
+        printf("[HID] OTG 状态变化: %s -> %s\n", 
+               last_otg_state ? "已连接" : "未连接",
+               current_otg_state ? "已连接" : "未连接");
+        
+        if (current_otg_state) {
+            // 重新连接
             close(hidg0_fd);
             hidg0_fd = open("/dev/hidg0", O_WRONLY | O_NONBLOCK);
             if (hidg0_fd >= 0) {
-                printf("[HID] Reopened /dev/hidg0\n");
-                // Retry write
-                n = write(hidg0_fd, report, sizeof(*report));
-                if (n == sizeof(*report)) return 0;
+                printf("[HID] 重新连接鼠标设备\n");
             }
+        }
+        last_otg_state = current_otg_state;
+    }
+    
+    // 如果未连接，不发送数据
+    if (!current_otg_state) {
+        return -1;
+    }
+    
+    ssize_t n = write(hidg0_fd, report, sizeof(*report));
+    if (n != sizeof(*report)) {
+        // 立即重连（不等待100次失败）
+        perror("[HID] mouse write failed");
+        
+        // 立即重连
+        close(hidg0_fd);
+        hidg0_fd = open("/dev/hidg0", O_WRONLY | O_NONBLOCK);
+        if (hidg0_fd >= 0) {
+            printf("[HID] 立即重连鼠标设备\n");
+            // 重试发送
+            n = write(hidg0_fd, report, sizeof(*report));
+            if (n == sizeof(*report)) return 0;
         }
         return -1;
     }
@@ -100,21 +125,46 @@ int usb_hid_keyboard_send(const hid_keyboard_report_t* report) {
     if (!keyboard_initialized || hidg1_fd < 0) {
         return -1;
     }
-    ssize_t n = write(hidg1_fd, report, sizeof(*report));
-    if (n != sizeof(*report)) {
-        // Try to reopen device if write failed
-        static int err_count = 0;
-        if (++err_count % 100 == 0) {
-            perror("[HID] keyboard write failed");
-            // Try to reopen
+    
+    // 检查 OTG 连接状态
+    static bool last_otg_state = false;
+    bool current_otg_state = usb_hid_otg_connected();
+    
+    // 如果 OTG 状态变化，立即重连
+    if (current_otg_state != last_otg_state) {
+        printf("[HID] OTG 状态变化: %s -> %s\n", 
+               last_otg_state ? "已连接" : "未连接",
+               current_otg_state ? "已连接" : "未连接");
+        
+        if (current_otg_state) {
+            // 重新连接
             close(hidg1_fd);
             hidg1_fd = open("/dev/hidg1", O_WRONLY | O_NONBLOCK);
             if (hidg1_fd >= 0) {
-                printf("[HID] Reopened /dev/hidg1\n");
-                // Retry write
-                n = write(hidg1_fd, report, sizeof(*report));
-                if (n == sizeof(*report)) return 0;
+                printf("[HID] 重新连接键盘设备\n");
             }
+        }
+        last_otg_state = current_otg_state;
+    }
+    
+    // 如果未连接，不发送数据
+    if (!current_otg_state) {
+        return -1;
+    }
+    
+    ssize_t n = write(hidg1_fd, report, sizeof(*report));
+    if (n != sizeof(*report)) {
+        // 立即重连（不等待100次失败）
+        perror("[HID] keyboard write failed");
+        
+        // 立即重连
+        close(hidg1_fd);
+        hidg1_fd = open("/dev/hidg1", O_WRONLY | O_NONBLOCK);
+        if (hidg1_fd >= 0) {
+            printf("[HID] 立即重连键盘设备\n");
+            // 重试发送
+            n = write(hidg1_fd, report, sizeof(*report));
+            if (n == sizeof(*report)) return 0;
         }
         return -1;
     }
@@ -128,30 +178,23 @@ bool usb_hid_keyboard_ready(void) {
 // ========== 通用 ==========
 
 static bool get_otg_state(void) {
-    // 检查 UDC 状态
-    FILE* f = fopen("/sys/class/udc", "r");
-    if (!f) {
-        return false;
-    }
+    // RK3588 的 UDC 是 fc000000.usb，直接硬编码更可靠
+    const char* udc_name = "fc000000.usb";
     
-    char udc_name[64];
-    if (fscanf(f, "%63s", udc_name) != 1) {
-        fclose(f);
-        return false;
-    }
-    fclose(f);
-    
+    // 读取 UDC 状态
     char state_path[128];
     snprintf(state_path, sizeof(state_path), 
              "/sys/class/udc/%s/state", udc_name);
     
-    f = fopen(state_path, "r");
-    if (!f) return false;
+    FILE* f = fopen(state_path, "r");
+    if (!f) {
+        return false;
+    }
     
     char state[64];
     bool connected = false;
     if (fscanf(f, "%63s", state) == 1) {
-        // "configured" 表示已连接到主机
+        // "configured" 或 "addressed" 表示已连接到主机
         connected = (strcmp(state, "configured") == 0) ||
                     (strcmp(state, "addressed") == 0);
     }
