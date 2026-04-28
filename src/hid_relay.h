@@ -112,6 +112,8 @@ private:
     int8_t accumulated_mouse_dx_ = 0;
     int8_t accumulated_mouse_dy_ = 0;
     
+    cv::Point2f aim_accumulated_delta_ = cv::Point2f(0, 0);
+    
     // OTG 连接状态
     bool otg_connected_ = false;
     bool last_otg_state_ = false;

@@ -66,16 +66,16 @@ private:
 
 // 弹簧-阻尼系统配置
 struct SpringConfig {
-    float stiffness = 8.0f;          // 刚度
-    float damping = 2.5f;            // 阻尼
-    float mass = 1.0f;               // 质量
+    float stiffness = 8.0f;
+    float damping = 2.5f;
+    float mass = 1.0f;
     
-    float max_speed = 120.0f;        // 最大速度（像素/秒）
-    float max_accel = 800.0f;        // 最大加速度
+    float max_speed = 8000.0f;
+    float max_accel = 50000.0f;
     
-    float micro_jitter = 0.8f;       // 微抖动幅度
-    float reaction_delay_ms = 80.0f; // 反应延迟
-    float overshoot_ratio = 0.06f;   // 过冲比例
+    float micro_jitter = 0.8f;
+    float reaction_delay_ms = 0.0f;
+    float overshoot_ratio = 0.06f;
 };
 
 // 弹簧-阻尼物理引擎
@@ -157,6 +157,9 @@ public:
     
     // 获取当前吸附位移（相对移动）
     cv::Point2f getAimDelta(float dt);
+    
+    // 更新准星位置（在应用移动增量后调用）
+    void updateCrosshairPosition(float dx, float dy);
     
     // 获取从屏幕中心到目标的绝对位移
     cv::Point2f getTargetOffsetFromCenter(float screen_width, float screen_height) const;

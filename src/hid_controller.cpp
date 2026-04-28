@@ -8,7 +8,7 @@ namespace hid {
 // ========== HIDController ==========
 
 HIDController::HIDController(const HIDConfig& cfg) 
-    : cfg_(cfg), initialized_(false), last_delta_(0, 0) {
+    : cfg_(cfg), initialized_(false), last_delta_(0, 0), accumulated_delta_(0, 0) {
 }
 
 HIDController::~HIDController() {
@@ -150,23 +150,19 @@ void AimSystem::update(const std::vector<PoseDetection>& detections,
 }
 
 cv::Point2f AimSystem::execute(float dt) {
-    if (!enabled_ || !initialized_ || !aim_engine_ || !hid_controller_) {
+    if (!enabled_ || !initialized_ || !aim_engine_) {
         return {0, 0};
     }
     
-    // 获取吸附位移
     cv::Point2f delta = aim_engine_->getAimDelta(dt);
     
-    // 如果位移太小，不移动
     if (std::abs(delta.x) < 0.5f && std::abs(delta.y) < 0.5f) {
         return {0, 0};
     }
     
-    // 获取强度
     float strength = 1.0f;
     if (aim_engine_->hasTarget()) {
         auto target = aim_engine_->getCurrentTarget();
-        // 根据距离调整强度
         if (target.distance_estimate > 30.0f) {
             strength = 0.6f;
         } else if (target.distance_estimate > 10.0f) {
@@ -174,12 +170,19 @@ cv::Point2f AimSystem::execute(float dt) {
         }
     }
     
-    // 执行 HID 移动
-    if (hid_controller_->aim(delta, strength)) {
-        return delta;
-    }
+    cv::Point2f scaled_delta = delta * hid_config_.sensitivity * strength;
     
-    return {0, 0};
+    scaled_delta.x = std::clamp(scaled_delta.x, -127.0f, 127.0f);
+    scaled_delta.y = std::clamp(scaled_delta.y, -127.0f, 127.0f);
+    
+    aim_engine_->updateCrosshairPosition(scaled_delta.x, scaled_delta.y);
+    
+    return scaled_delta;
+}
+
+void AimSystem::updateCrosshairPosition(float dx, float dy) {
+    if (!initialized_ || !aim_engine_) return;
+    aim_engine_->updateCrosshairPosition(dx, dy);
 }
 
 bool AimSystem::moveToTarget(float screen_width, float screen_height) {

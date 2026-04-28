@@ -164,6 +164,15 @@ static int parse_key_name(const char* name) {
      return s.substr(start, end - start + 1);
  }
 
+ static std::string parse_value(const char* line) {
+     std::string s = line;
+     size_t comment_pos = s.find('#');
+     if (comment_pos != std::string::npos) {
+         s = s.substr(0, comment_pos);
+     }
+     return trim(s);
+ }
+
  static const char* key_code_to_name(int code) {
      switch(code) {
          case 59: return "F1";
@@ -288,10 +297,23 @@ int main(int argc, char** argv) {
 
     // Parse --config option first
     const char* config_file = nullptr;
+    static std::string config_path;  // 静态变量保存路径
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_file = argv[++i];
             break;
+        }
+    }
+
+    // If no config file specified, try to load from exe dir first
+    if (!config_file) {
+        config_path = exe_dir + "config.ini";
+        if (access(config_path.c_str(), R_OK) == 0) {
+            config_file = config_path.c_str();
+            printf("Auto-loading config from: %s\n", config_file);
+        } else if (access("config.ini", R_OK) == 0) {
+            config_file = "config.ini";
+            printf("Auto-loading config from: %s\n", config_file);
         }
     }
 
@@ -321,38 +343,93 @@ int main(int argc, char** argv) {
                         device = strdup(path);
                     }
                 }
+                // 解析 HID 设备
+                if (strstr(line, "keyboard_device = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) {
+                        char* path = eq + 1;
+                        while (*path == ' ') path++;
+                        // 移除注释部分
+                        char* comment = strstr(path, "#");
+                        if (comment) *comment = '\0';
+                        // 移除换行和空格
+                        char* end = path + strlen(path) - 1;
+                        while (end > path && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                        if (strlen(path) > 0 && strcmp(path, "") != 0) {
+                            g_keyboard_device = strdup(path);
+                        }
+                    }
+                }
+                if (strstr(line, "mouse_device = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) {
+                        char* path = eq + 1;
+                        while (*path == ' ') path++;
+                        char* comment = strstr(path, "#");
+                        if (comment) *comment = '\0';
+                        char* end = path + strlen(path) - 1;
+                        while (end > path && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                        if (strlen(path) > 0 && strcmp(path, "") != 0) {
+                            g_mouse_device = strdup(path);
+                        }
+                    }
+                }
                 // 解析按键映射
                 if (strstr(line, "key_legit = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_legit = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_legit = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_semirage = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_semirage = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_semirage = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_rage = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_rage = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_rage = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_autofire = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_autofire = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_autofire = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_mode = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_mode = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_mode = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_sens_up = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_sens_up = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_sens_up = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_sens_down = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_sens_down = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_sens_down = parse_key_name(val.c_str()); 
+                    }
                 }
                 if (strstr(line, "key_game_mode = ")) {
                     char* eq = strstr(line, "=");
-                    if (eq) { g_key_game_mode = parse_key_name(trim(eq+1).c_str()); }
+                    if (eq) { 
+                        std::string val = parse_value(eq+1);
+                        g_key_game_mode = parse_key_name(val.c_str()); 
+                    }
                 }
             }
             fclose(fp);

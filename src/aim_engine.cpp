@@ -98,51 +98,53 @@ SpringAim::SpringAim(const SpringConfig& cfg)
 }
 
 cv::Point2f SpringAim::update(cv::Point2f target, float dt) {
-    // 反应延迟
     target_history_.push_back(target);
     if (target_history_.size() > reactionBufferSize()) {
         target_history_.pop_front();
     }
     cv::Point2f delayed_target = target_history_.front();
     
-    // 弹簧力
     cv::Point2f displacement = delayed_target - current_pos_;
     cv::Point2f spring_force = displacement * cfg_.stiffness;
     
-    // 阻尼力
     cv::Point2f damping_force = velocity_ * (-cfg_.damping);
     
-    // 合力
     cv::Point2f total_force = spring_force + damping_force;
     
-    // 限制加速度
     float force_mag = std::sqrt(total_force.x * total_force.x + total_force.y * total_force.y);
     if (force_mag > cfg_.max_accel * cfg_.mass) {
         total_force = total_force * (cfg_.max_accel * cfg_.mass / force_mag);
     }
     
-    // 积分
     cv::Point2f accel = total_force / cfg_.mass;
     velocity_ = velocity_ + accel * dt;
     
-    // 限制速度
     float speed = std::sqrt(velocity_.x * velocity_.x + velocity_.y * velocity_.y);
     if (speed > cfg_.max_speed) {
         velocity_ = velocity_ * (cfg_.max_speed / speed);
     }
     
-    // 过冲模拟
     if (speed > 10.0f && approachingTarget(displacement, velocity_)) {
         velocity_ = velocity_ * (1.0f + cfg_.overshoot_ratio);
     }
     
-    // 微抖动
     float jitter_x = jitter_dist_(rng_);
     float jitter_y = jitter_dist_(rng_);
     
     current_pos_ = current_pos_ + velocity_ * dt;
     current_pos_.x += jitter_x;
     current_pos_.y += jitter_y;
+    
+    static int debug_count = 0;
+    if (debug_count++ % 60 == 0) {
+        printf("[SPRING] target=(%.0f,%.0f) pos=(%.0f,%.0f) disp=(%.0f,%.0f) force=(%.0f,%.0f) vel=(%.1f,%.1f) speed=%.0f dt=%.4f delta=(%.2f,%.2f)\n",
+               delayed_target.x, delayed_target.y,
+               current_pos_.x, current_pos_.y,
+               displacement.x, displacement.y,
+               total_force.x, total_force.y,
+               velocity_.x, velocity_.y, speed, dt,
+               velocity_.x * dt, velocity_.y * dt);
+    }
     
     return velocity_ * dt;
 }
@@ -194,9 +196,9 @@ AimConfig getPreset(AimPreset preset) {
             
             cfg.spring.stiffness = 5.0f;
             cfg.spring.damping = 3.0f;
-            cfg.spring.max_speed = 80.0f;
+            cfg.spring.max_speed = 8000.0f;
             cfg.spring.micro_jitter = 1.2f;
-            cfg.spring.reaction_delay_ms = 120.0f;
+            cfg.spring.reaction_delay_ms = 0.0f;
             cfg.spring.overshoot_ratio = 0.08f;
             
             cfg.strength.close_strength = 0.7f;
@@ -214,9 +216,9 @@ AimConfig getPreset(AimPreset preset) {
             
             cfg.spring.stiffness = 8.0f;
             cfg.spring.damping = 2.5f;
-            cfg.spring.max_speed = 120.0f;
+            cfg.spring.max_speed = 12000.0f;
             cfg.spring.micro_jitter = 0.8f;
-            cfg.spring.reaction_delay_ms = 80.0f;
+            cfg.spring.reaction_delay_ms = 0.0f;
             cfg.spring.overshoot_ratio = 0.06f;
             
             cfg.strength.close_strength = 1.0f;
@@ -234,9 +236,9 @@ AimConfig getPreset(AimPreset preset) {
             
             cfg.spring.stiffness = 15.0f;
             cfg.spring.damping = 1.5f;
-            cfg.spring.max_speed = 200.0f;
+            cfg.spring.max_speed = 20000.0f;
             cfg.spring.micro_jitter = 0.3f;
-            cfg.spring.reaction_delay_ms = 40.0f;
+            cfg.spring.reaction_delay_ms = 0.0f;
             cfg.spring.overshoot_ratio = 0.02f;
             
             cfg.strength.close_strength = 1.0f;
@@ -299,16 +301,17 @@ void AimEngine::updateTarget(const std::vector<PoseDetection>& detections,
     current_target_ = selector_.select(*best_det, screen_height);
     
     if (!has_target_) {
-        // 新目标，重置弹簧系统
-        spring_.reset(current_target_.pos);
+        cv::Point2f screen_center(screen_width / 2.0f, screen_height / 2.0f);
+        spring_.reset(screen_center);
         fire_delay_counter_ = cfg_.fire_delay_frames + (rng_() % 3);
         frames_locked_ = 0;
-        printf("[AIM] New target acquired: pos=(%.0f, %.0f) part=%s score=%.2f\n",
+        printf("[AIM] New target acquired: pos=(%.0f, %.0f) part=%s score=%.2f screen_center=(%.0f,%.0f)\n",
                current_target_.pos.x, current_target_.pos.y,
                current_target_.body_part == HEAD ? "HEAD" :
                current_target_.body_part == NECK ? "NECK" :
                current_target_.body_part == CHEST ? "CHEST" : "BELLY",
-               current_target_.confidence);
+               current_target_.confidence,
+               screen_center.x, screen_center.y);
     }
     
     has_target_ = true;
@@ -320,14 +323,30 @@ cv::Point2f AimEngine::getAimDelta(float dt) {
         return {0, 0};
     }
     
-    // 获取弹簧位移
+    cv::Point2f spring_pos = spring_.getCurrentPos();
     cv::Point2f delta = spring_.update(current_target_.pos, dt);
     
-    // 应用强度曲线
     float strength = strength_curve_.getStrength(current_target_.distance_estimate);
-    delta = delta * strength;
+    cv::Point2f scaled_delta = delta * strength;
     
-    return delta;
+    static int debug_count = 0;
+    if (debug_count++ % 60 == 0) {
+        printf("[AIM-DELTA] target=(%.0f,%.0f) spring_pos=(%.0f,%.0f) raw_delta=(%.1f,%.1f) strength=%.2f final_delta=(%.1f,%.1f)\n",
+               current_target_.pos.x, current_target_.pos.y,
+               spring_pos.x, spring_pos.y,
+               delta.x, delta.y, strength,
+               scaled_delta.x, scaled_delta.y);
+    }
+    
+    return scaled_delta;
+}
+
+void AimEngine::updateCrosshairPosition(float dx, float dy) {
+    if (has_target_) {
+        cv::Point2f current = spring_.getCurrentPos();
+        cv::Point2f new_pos(current.x + dx, current.y + dy);
+        spring_.reset(new_pos);
+    }
 }
 
 cv::Point2f AimEngine::getTargetOffsetFromCenter(float screen_width, float screen_height) const {

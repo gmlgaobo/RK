@@ -1,5 +1,6 @@
 #include "hid_relay.h"
 #include "usb_hid.h"
+#include "hid_keycode_map.h"
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -121,7 +122,7 @@ void HIDRelay::stop() {
 }
 
 void HIDRelay::toggle_game_mode() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    // 注意：调用此函数时已经持有 state_mutex_ 锁，不要再加锁
     game_mode_ = !game_mode_;
     printf("[RELAY] 游戏模式: %s\n", game_mode_ ? "开启" : "关闭");
     
@@ -219,6 +220,11 @@ bool HIDRelay::isFunctionKey(int keycode) const {
 void HIDRelay::handleKeyboardEvent(const input_event& ev) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     
+    // 调试输出
+    if (ev.type == EV_KEY) {
+        printf("[RELAY-DEBUG] 键盘事件: code=%d, value=%d, F9=%d\n", ev.code, ev.value, cfg_.toggle_game_mode_key);
+    }
+    
     // 首先处理功能键（即使不在游戏模式也响应）
     if (ev.type == EV_KEY) {
         if (isFunctionKey(ev.code)) {
@@ -287,11 +293,14 @@ void HIDRelay::handleKeyboardEvent(const input_event& ev) {
                 current_keyboard_.modifiers &= ~modifier_bit;
             }
         } else {
-            // 处理普通按键
-            uint8_t hid_code = ev.code; // 这里需要转换，暂时直接用
+            uint8_t hid_code = linux_keycode_to_hid(ev.code);
+            
+            if (hid_code == 0) {
+                printf("[RELAY-WARN] 未映射的按键: linux_code=%d\n", ev.code);
+                return;
+            }
             
             if (ev.value == 1) {
-                // 按键按下
                 for (int i = 0; i < 6; i++) {
                     if (current_keyboard_.keycodes[i] == 0) {
                         current_keyboard_.keycodes[i] = hid_code;
@@ -369,10 +378,6 @@ void HIDRelay::mouseThreadFunc() {
 bool HIDRelay::sendCombinedReport() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     
-    if (!game_mode_) {
-        return true;
-    }
-    
     // 准备鼠标报告
     int8_t dx = accumulated_mouse_dx_;
     int8_t dy = accumulated_mouse_dy_;
@@ -382,16 +387,42 @@ bool HIDRelay::sendCombinedReport() {
     accumulated_mouse_dx_ = 0;
     accumulated_mouse_dy_ = 0;
     
-    // 吸附引擎覆盖鼠标移动
-    if (aim_system_ && aim_system_->isEnabled() && aim_system_->hasTarget()) {
-        float dt = 1.0f / 1000.0f; // 1000Hz
-        cv::Point2f aim_delta = aim_system_->execute(dt);
-        dx = static_cast<int8_t>(std::clamp(aim_delta.x, -127.0f, 127.0f));
-        dy = static_cast<int8_t>(std::clamp(aim_delta.y, -127.0f, 127.0f));
+    // 调试输出
+    static int debug_counter = 0;
+    if (debug_counter++ % 1000 == 0 && game_mode_) {  // 每 1000 次输出一次
+        printf("[RELAY-DEBUG] game_mode=%d, aim_system=%p, enabled=%d, hasTarget=%d\n",
+               game_mode_, (void*)aim_system_, 
+               aim_system_ ? aim_system_->isEnabled() : 0,
+               aim_system_ ? aim_system_->hasTarget() : 0);
     }
     
-    // 发送键盘报告
-    if (usb_hid_keyboard_ready()) {
+    // 游戏模式下，吸附引擎覆盖鼠标移动
+    bool aim_active = false;
+    if (game_mode_ && aim_system_ && aim_system_->isEnabled() && aim_system_->hasTarget()) {
+        float dt = 1.0f / 1000.0f;
+        cv::Point2f aim_delta = aim_system_->execute(dt);
+        
+        aim_accumulated_delta_.x += aim_delta.x;
+        aim_accumulated_delta_.y += aim_delta.y;
+        
+        if (std::abs(aim_accumulated_delta_.x) >= 1.0f || std::abs(aim_accumulated_delta_.y) >= 1.0f) {
+            dx = static_cast<int8_t>(std::clamp(aim_accumulated_delta_.x, -127.0f, 127.0f));
+            dy = static_cast<int8_t>(std::clamp(aim_accumulated_delta_.y, -127.0f, 127.0f));
+            
+            aim_accumulated_delta_.x -= dx;
+            aim_accumulated_delta_.y -= dy;
+            
+            aim_active = true;
+            printf("[RELAY-AIM] accumulated=(%.1f,%.1f) aim_delta=(%.1f,%.1f) dx=%d, dy=%d\n", 
+                   aim_accumulated_delta_.x, aim_accumulated_delta_.y,
+                   aim_delta.x, aim_delta.y, dx, dy);
+        }
+    } else if (game_mode_ && aim_system_ && (dx != 0 || dy != 0)) {
+        aim_system_->updateCrosshairPosition(dx, dy);
+    }
+    
+    // 发送键盘报告（游戏模式下才转发键盘）
+    if (game_mode_ && usb_hid_keyboard_ready()) {
         hid_keyboard_report_t report;
         report.modifiers = current_keyboard_.modifiers;
         report.reserved = 0;
