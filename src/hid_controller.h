@@ -2,6 +2,7 @@
 #define HID_CONTROLLER_H
 
 #include <opencv2/opencv.hpp>
+#include <string>
 #include "aim_engine.h"
 
 namespace hid {
@@ -82,14 +83,17 @@ public:
     void setEnabled(bool enabled) { enabled_ = enabled; }
     bool isEnabled() const { return enabled_; }
     
-    // 设置灵敏度
+    void setConfigFile(const std::string& path) { config_file_ = path; }
+    std::string getConfigFile() const { return config_file_; }
+    
     void setSensitivity(float sens) { hid_config_.sensitivity = sens; }
     float getSensitivity() const { return hid_config_.sensitivity; }
     
-    // 设置吸附模式
     void setAbsoluteMode(bool absolute) { absolute_mode_ = absolute; }
     bool isAbsoluteMode() const { return absolute_mode_; }
     
+    aim::AimPreset getCurrentPreset() const { return current_preset_; }
+
 private:
     aim::AimEngine* aim_engine_;
     HIDController* hid_controller_;
@@ -97,7 +101,11 @@ private:
     HIDConfig hid_config_;
     bool enabled_;
     bool initialized_;
-    bool absolute_mode_ = true;  // 默认使用绝对定位模式
+    bool absolute_mode_ = true;
+    std::string config_file_;
+    aim::AimPreset current_preset_ = aim::AimPreset::LEGIT;
+    
+    bool loadPresetFromFile(aim::AimPreset preset, aim::AimConfig& cfg);
 };
 
 } // namespace hid

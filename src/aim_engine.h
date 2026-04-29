@@ -141,7 +141,8 @@ struct AimConfig {
 enum class AimPreset {
     LEGIT,      //  legit 模式（最像人类）
     SEMI_RAGE,  // 半激进
-    RAGE        // 激进（高风险）
+    RAGE,       // 激进（高风险）
+    CUSTOM      // 自定义预设
 };
 
 AimConfig getPreset(AimPreset preset);

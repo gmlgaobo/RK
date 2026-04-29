@@ -247,6 +247,26 @@ AimConfig getPreset(AimPreset preset) {
             
             cfg.fire_delay_frames = 1;
             break;
+            
+        case AimPreset::CUSTOM:
+            // 自定义预设（默认值，会从配置文件中覆盖）
+            cfg.selector.head_weight = 4.0f;
+            cfg.selector.neck_weight = 2.5f;
+            cfg.selector.adaptive_body_part = true;
+            
+            cfg.spring.stiffness = 10.0f;
+            cfg.spring.damping = 2.0f;
+            cfg.spring.max_speed = 15000.0f;
+            cfg.spring.micro_jitter = 0.5f;
+            cfg.spring.reaction_delay_ms = 0.0f;
+            cfg.spring.overshoot_ratio = 0.04f;
+            
+            cfg.strength.close_strength = 0.85f;
+            cfg.strength.mid_strength = 0.7f;
+            cfg.strength.far_strength = 0.4f;
+            
+            cfg.fire_delay_frames = 2;
+            break;
     }
     
     return cfg;

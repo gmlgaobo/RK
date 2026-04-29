@@ -133,17 +133,8 @@ int usb_hid_mouse_send(const hid_mouse_report_t* report) {
         return -1;
     }
     
-    // 直接发送数据，不检查OTG状态
     ssize_t n = write(hidg0_fd, report, sizeof(*report));
     if (n != sizeof(*report)) {
-        // 简单重连
-        close(hidg0_fd);
-        hidg0_fd = open("/dev/hidg0", O_WRONLY);
-        if (hidg0_fd >= 0) {
-            // 重试
-            n = write(hidg0_fd, report, sizeof(*report));
-            if (n == sizeof(*report)) return 0;
-        }
         return -1;
     }
     return 0;
@@ -198,17 +189,8 @@ int usb_hid_keyboard_send(const hid_keyboard_report_t* report) {
         return -1;
     }
     
-    // 直接发送数据，不检查OTG状态
     ssize_t n = write(hidg1_fd, report, sizeof(*report));
     if (n != sizeof(*report)) {
-        // 简单重连
-        close(hidg1_fd);
-        hidg1_fd = open("/dev/hidg1", O_WRONLY);
-        if (hidg1_fd >= 0) {
-            // 重试
-            n = write(hidg1_fd, report, sizeof(*report));
-            if (n == sizeof(*report)) return 0;
-        }
         return -1;
     }
     return 0;
@@ -219,6 +201,11 @@ bool usb_hid_keyboard_ready(void) {
 }
 
 // ========== 通用 ==========
+
+// 去抖动相关变量
+static bool stable_otg_state = false;
+static int consecutive_count = 0;
+static const int DEBOUNCE_THRESHOLD = 100;
 
 static bool get_otg_state(void) {
     // RK3588 的 UDC 是 fc000000.usb，直接硬编码更可靠
@@ -247,16 +234,33 @@ static bool get_otg_state(void) {
 }
 
 bool usb_hid_otg_connected(void) {
-    return get_otg_state();
+    return stable_otg_state;
 }
 
 bool usb_hid_otg_state_changed(bool* prev_state) {
     if (!prev_state) return false;
     
-    bool new_state = get_otg_state();
-    if (new_state != *prev_state) {
-        *prev_state = new_state;
-        return true;
+    bool raw_state = get_otg_state();
+    
+    // 去抖动逻辑
+    if (raw_state == stable_otg_state) {
+        // 状态相同，重置计数器
+        consecutive_count = 0;
+    } else {
+        // 状态不同，增加计数
+        consecutive_count++;
+        
+        // 如果连续 DEBOUNCE_THRESHOLD 次检测到相同状态，才认为状态真正改变了
+        if (consecutive_count >= DEBOUNCE_THRESHOLD) {
+            stable_otg_state = raw_state;
+            consecutive_count = 0;
+            
+            if (stable_otg_state != *prev_state) {
+                *prev_state = stable_otg_state;
+                return true;
+            }
+        }
     }
+    
     return false;
 }

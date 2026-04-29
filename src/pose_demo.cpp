@@ -27,6 +27,10 @@
 #include <queue>
 #include <atomic>
 #include <getopt.h>
+#include <fstream>
+#include <sstream>
+#include <map>
+#include <dirent.h>
 
 using namespace std::chrono;
 
@@ -194,6 +198,46 @@ static int parse_key_name(const char* name) {
 // 模式 B: 完整转发配置（设置为空表示禁用转发）
 const char* g_keyboard_device = nullptr;  // "/dev/input/event0"
 const char* g_mouse_device = nullptr;     // "/dev/input/event1"
+
+// 自动探测输入设备
+static std::string find_input_device(const std::string& pattern) {
+    DIR* dir = opendir("/dev/input/by-path/");
+    if (!dir) {
+        return "";
+    }
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.find(pattern) != std::string::npos) {
+            closedir(dir);
+            return "/dev/input/by-path/" + name;
+        }
+    }
+    
+    closedir(dir);
+    return "";
+}
+
+// 探测输入设备并设置全局变量
+static void auto_detect_input_devices() {
+    static std::string auto_keyboard;
+    static std::string auto_mouse;
+    
+    // 先按 by-path 方式探测
+    auto_keyboard = find_input_device("kbd");
+    auto_mouse = find_input_device("mouse");
+    
+    // 如果没有找到，尝试枚举所有 event 设备（略）
+    if (!auto_keyboard.empty()) {
+        g_keyboard_device = auto_keyboard.c_str();
+        printf("[AUTO] 自动探测到键盘设备: %s\n", g_keyboard_device);
+    }
+    if (!auto_mouse.empty()) {
+        g_mouse_device = auto_mouse.c_str();
+        printf("[AUTO] 自动探测到鼠标设备: %s\n", g_mouse_device);
+    }
+}
 
 int g_key_legit = 59;        // F1
 int g_key_semirage = 60;     // F2
@@ -439,6 +483,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    // 自动探测输入设备（如果配置文件未指定或指定的设备打开失败会使用）
+    auto_detect_input_devices();
+
     // Parse positional arguments and optional keyboard/mouse arguments
     std::vector<char*> positional_args;
     for (int i = 1; i < argc; i++) {
@@ -535,6 +582,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Warning: Failed to initialize HID controller. Aim assist will be visual only.\n");
         fprintf(stderr, "To enable HID control, run as root or configure udev rules.\n");
     } else {
+        if (config_file) {
+            g_aim_system->setConfigFile(config_file);
+            g_aim_system->setPreset(g_aim_preset);
+        }
         g_aim_system->setEnabled(g_aim_enabled);
         printf("Aim system initialized. Aim is: %s (Auto-fire: %s)\n", 
                g_aim_enabled ? "ON" : "OFF", g_auto_fire ? "ON" : "OFF");

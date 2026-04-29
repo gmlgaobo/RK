@@ -76,22 +76,26 @@ bool HIDRelay::start() {
     if (cfg_.keyboard_device) {
         keyboard_fd_ = openInputDevice(cfg_.keyboard_device);
         if (keyboard_fd_ >= 0) {
-            printf("[RELAY] 键盘设备已打开: %s\n", cfg_.keyboard_device);
+            printf("[RELAY] 键盘设备已打开: %s, fd=%d\n", cfg_.keyboard_device, keyboard_fd_);
             keyboard_thread_ = std::thread(&HIDRelay::keyboardThreadFunc, this);
         } else {
             fprintf(stderr, "[RELAY] 错误: 无法打开键盘设备 %s\n", cfg_.keyboard_device);
         }
+    } else {
+        printf("[RELAY] 键盘设备未配置\n");
     }
     
     // 打开鼠标设备
     if (cfg_.mouse_device) {
         mouse_fd_ = openInputDevice(cfg_.mouse_device);
         if (mouse_fd_ >= 0) {
-            printf("[RELAY] 鼠标设备已打开: %s\n", cfg_.mouse_device);
+            printf("[RELAY] 鼠标设备已打开: %s, fd=%d\n", cfg_.mouse_device, mouse_fd_);
             mouse_thread_ = std::thread(&HIDRelay::mouseThreadFunc, this);
         } else {
             fprintf(stderr, "[RELAY] 错误: 无法打开鼠标设备 %s\n", cfg_.mouse_device);
         }
+    } else {
+        printf("[RELAY] 鼠标设备未配置\n");
     }
     
     // 启动组合报告线程
@@ -181,29 +185,32 @@ bool HIDRelay::grabDevice(int fd, bool grab) {
 }
 
 void HIDRelay::updateGrabState() {
-    if (game_mode_) {
-        // 游戏模式开启: 拦截设备
-        if (cfg_.keyboard_device && keyboard_fd_ >= 0 && !keyboard_grabbed_) {
-            if (grabDevice(keyboard_fd_, true)) {
-                keyboard_grabbed_ = true;
-            }
-        }
-        if (cfg_.mouse_device && mouse_fd_ >= 0 && !mouse_grabbed_) {
-            if (grabDevice(mouse_fd_, true)) {
-                mouse_grabbed_ = true;
-            }
-        }
-    } else {
-        // 游戏模式关闭: 释放设备
-        if (cfg_.keyboard_device && keyboard_fd_ >= 0 && keyboard_grabbed_) {
-            grabDevice(keyboard_fd_, false);
-            keyboard_grabbed_ = false;
-        }
-        if (cfg_.mouse_device && mouse_fd_ >= 0 && mouse_grabbed_) {
-            grabDevice(mouse_fd_, false);
-            mouse_grabbed_ = false;
-        }
-    }
+    // 暂时禁用设备抓取，先测试基础转发是否工作
+    printf("[RELAY] updateGrabState: disabled for testing, gm=%d\n", game_mode_);
+    
+    // if (game_mode_) {
+    //     // 游戏模式开启: 拦截设备
+    //     if (cfg_.keyboard_device && keyboard_fd_ >= 0 && !keyboard_grabbed_) {
+    //         if (grabDevice(keyboard_fd_, true)) {
+    //             keyboard_grabbed_ = true;
+    //         }
+    //     }
+    //     if (cfg_.mouse_device && mouse_fd_ >= 0 && !mouse_grabbed_) {
+    //         if (grabDevice(mouse_fd_, true)) {
+    //             mouse_grabbed_ = true;
+    //         }
+    //     }
+    // } else {
+    //     // 游戏模式关闭: 释放设备
+    //     if (cfg_.keyboard_device && keyboard_fd_ >= 0 && keyboard_grabbed_) {
+    //         grabDevice(keyboard_fd_, false);
+    //         keyboard_grabbed_ = false;
+    //     }
+    //     if (cfg_.mouse_device && mouse_fd_ >= 0 && mouse_grabbed_) {
+    //         grabDevice(mouse_fd_, false);
+    //         mouse_grabbed_ = false;
+    //     }
+    // }
 }
 
 bool HIDRelay::isFunctionKey(int keycode) const {
@@ -219,11 +226,6 @@ bool HIDRelay::isFunctionKey(int keycode) const {
 
 void HIDRelay::handleKeyboardEvent(const input_event& ev) {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    
-    // 调试输出
-    if (ev.type == EV_KEY) {
-        printf("[RELAY-DEBUG] 键盘事件: code=%d, value=%d, F9=%d\n", ev.code, ev.value, cfg_.toggle_game_mode_key);
-    }
     
     // 首先处理功能键（即使不在游戏模式也响应）
     if (ev.type == EV_KEY) {
@@ -260,6 +262,7 @@ void HIDRelay::handleKeyboardEvent(const input_event& ev) {
                         printf("[RELAY] 灵敏度: %.1f\n", new_sens);
                     }
                 } else if (ev.code == cfg_.toggle_game_mode_key) {
+                    printf("[RELAY] F9 pressed, toggling game mode from %d\n", game_mode_);
                     toggle_game_mode();
                 }
             }
@@ -296,7 +299,6 @@ void HIDRelay::handleKeyboardEvent(const input_event& ev) {
             uint8_t hid_code = linux_keycode_to_hid(ev.code);
             
             if (hid_code == 0) {
-                printf("[RELAY-WARN] 未映射的按键: linux_code=%d\n", ev.code);
                 return;
             }
             
@@ -352,19 +354,21 @@ void HIDRelay::handleMouseEvent(const input_event& ev) {
 }
 
 void HIDRelay::keyboardThreadFunc() {
-    printf("[RELAY] 键盘事件线程已启动\n");
+    printf("[RELAY] 键盘事件线程已启动, fd=%d\n", keyboard_fd_);
     setRealtimePriority();
     
     while (running_) {
         input_event ev;
         if (readInputEvent(keyboard_fd_, ev)) {
+            // 只在游戏模式下，或者是功能键时才输出原始事件
+            // 减少日志噪音
             handleKeyboardEvent(ev);
         }
     }
 }
 
 void HIDRelay::mouseThreadFunc() {
-    printf("[RELAY] 鼠标事件线程已启动\n");
+    printf("[RELAY] 鼠标事件线程已启动, fd=%d\n", mouse_fd_);
     setRealtimePriority();
     
     while (running_) {
@@ -379,65 +383,81 @@ bool HIDRelay::sendCombinedReport() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     
     // 准备鼠标报告
-    int8_t dx = accumulated_mouse_dx_;
-    int8_t dy = accumulated_mouse_dy_;
+    int8_t physical_dx = accumulated_mouse_dx_;
+    int8_t physical_dy = accumulated_mouse_dy_;
     uint8_t buttons = current_mouse_buttons_;
     
     // 重置累计
     accumulated_mouse_dx_ = 0;
     accumulated_mouse_dy_ = 0;
     
-    // 调试输出
-    static int debug_counter = 0;
-    if (debug_counter++ % 1000 == 0 && game_mode_) {  // 每 1000 次输出一次
-        printf("[RELAY-DEBUG] game_mode=%d, aim_system=%p, enabled=%d, hasTarget=%d\n",
-               game_mode_, (void*)aim_system_, 
-               aim_system_ ? aim_system_->isEnabled() : 0,
-               aim_system_ ? aim_system_->hasTarget() : 0);
-    }
+    // 最终发送的 dx/dy (默认物理输入)
+    int8_t final_dx = physical_dx;
+    int8_t final_dy = physical_dy;
     
-    // 游戏模式下，吸附引擎覆盖鼠标移动
-    bool aim_active = false;
-    if (game_mode_ && aim_system_ && aim_system_->isEnabled() && aim_system_->hasTarget()) {
-        float dt = 1.0f / 1000.0f;
+    bool should_aim = (game_mode_ && aim_system_ && aim_system_->isEnabled() && aim_system_->hasTarget());
+    
+    // 游戏模式下，吸附引擎叠加到鼠标移动（不要覆盖！）
+    if (should_aim) {
+        float dt = 0.016f;
         cv::Point2f aim_delta = aim_system_->execute(dt);
         
         aim_accumulated_delta_.x += aim_delta.x;
         aim_accumulated_delta_.y += aim_delta.y;
         
+        int8_t aim_dx = 0, aim_dy = 0;
         if (std::abs(aim_accumulated_delta_.x) >= 1.0f || std::abs(aim_accumulated_delta_.y) >= 1.0f) {
-            dx = static_cast<int8_t>(std::clamp(aim_accumulated_delta_.x, -127.0f, 127.0f));
-            dy = static_cast<int8_t>(std::clamp(aim_accumulated_delta_.y, -127.0f, 127.0f));
+            aim_dx = static_cast<int8_t>(std::clamp(aim_accumulated_delta_.x, -127.0f, 127.0f));
+            aim_dy = static_cast<int8_t>(std::clamp(aim_accumulated_delta_.y, -127.0f, 127.0f));
             
-            aim_accumulated_delta_.x -= dx;
-            aim_accumulated_delta_.y -= dy;
-            
-            aim_active = true;
-            printf("[RELAY-AIM] accumulated=(%.1f,%.1f) aim_delta=(%.1f,%.1f) dx=%d, dy=%d\n", 
-                   aim_accumulated_delta_.x, aim_accumulated_delta_.y,
-                   aim_delta.x, aim_delta.y, dx, dy);
+            aim_accumulated_delta_.x -= aim_dx;
+            aim_accumulated_delta_.y -= aim_dy;
         }
-    } else if (game_mode_ && aim_system_ && (dx != 0 || dy != 0)) {
-        aim_system_->updateCrosshairPosition(dx, dy);
+        
+        // 关键修复：物理鼠标输入 + 瞄准输入 叠加
+        final_dx = static_cast<int8_t>(std::clamp(static_cast<float>(physical_dx) + static_cast<float>(aim_dx), -127.0f, 127.0f));
+        final_dy = static_cast<int8_t>(std::clamp(static_cast<float>(physical_dy) + static_cast<float>(aim_dy), -127.0f, 127.0f));
+        
+        aim_system_->updateCrosshairPosition(final_dx, final_dy);
+    } else if (game_mode_ && aim_system_ && (physical_dx != 0 || physical_dy != 0)) {
+        aim_system_->updateCrosshairPosition(physical_dx, physical_dy);
     }
     
     // 发送键盘报告（游戏模式下才转发键盘）
-    if (game_mode_ && usb_hid_keyboard_ready()) {
-        hid_keyboard_report_t report;
-        report.modifiers = current_keyboard_.modifiers;
-        report.reserved = 0;
-        memcpy(report.keycodes, current_keyboard_.keycodes, 6);
-        usb_hid_keyboard_send(&report);
+    if (game_mode_ && usb_hid_keyboard_ready() && otg_connected_) {
+        bool has_key = (current_keyboard_.modifiers != 0);
+        for (int i = 0; i < 6 && !has_key; i++) {
+            if (current_keyboard_.keycodes[i] != 0) has_key = true;
+        }
+        
+        if (has_key) {
+            hid_keyboard_report_t report;
+            report.modifiers = current_keyboard_.modifiers;
+            report.reserved = 0;
+            memcpy(report.keycodes, current_keyboard_.keycodes, 6);
+            
+            int ret = usb_hid_keyboard_send(&report);
+            static int kb_err_count = 0;
+            if (ret != 0 && kb_err_count++ % 100 == 0) {
+                printf("[RELAY-ERR] keyboard send failed (count: %d)\n", kb_err_count);
+            }
+        }
     }
     
-    // 发送鼠标报告
-    if (usb_hid_mouse_ready()) {
-        hid_mouse_report_t report;
-        report.buttons = buttons;
-        report.dx = dx;
-        report.dy = dy;
-        report.scroll = 0;
-        usb_hid_mouse_send(&report);
+    if (usb_hid_mouse_ready() && otg_connected_) {
+        if (final_dx != 0 || final_dy != 0 || buttons != 0) {
+            hid_mouse_report_t report;
+            report.buttons = buttons;
+            report.dx = final_dx;
+            report.dy = final_dy;
+            report.scroll = 0;
+            
+            int ret = usb_hid_mouse_send(&report);
+            static int mouse_err_count = 0;
+            if (ret != 0 && mouse_err_count++ % 100 == 0) {
+                printf("[RELAY-ERR] mouse send failed (count: %d)\n", mouse_err_count);
+            }
+        }
     }
     
     return true;
@@ -458,20 +478,21 @@ void HIDRelay::comboThreadFunc() {
     }
     
     while (running_) {
-        // 检测 OTG 状态变化（仅用于显示）
-        if (usb_hid_otg_state_changed(&last_otg_state_)) {
-            otg_connected_ = last_otg_state_;
-            if (otg_connected_) {
-                printf("\n[RELAY] ========== USB OTG 已连接 ==========\n");
-            } else {
-                printf("\n[RELAY] ========== USB OTG 已断开 ==========\n");
+        static int otg_check_counter = 0;
+        if (otg_check_counter++ % 100 == 0) {
+            if (usb_hid_otg_state_changed(&last_otg_state_)) {
+                otg_connected_ = last_otg_state_;
+                if (otg_connected_) {
+                    printf("\n[RELAY] ========== USB OTG 已连接 ==========\n");
+                } else {
+                    printf("\n[RELAY] ========== USB OTG 已断开 ==========\n");
+                }
             }
         }
         
-        // 发送报告
         sendCombinedReport();
         
-        usleep(1000); // 1000Hz (1ms 间隔)
+        usleep(1000);
     }
 }
 

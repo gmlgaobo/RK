@@ -2,6 +2,9 @@
 #include "usb_hid.h"
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <map>
 
 namespace hid {
 
@@ -156,6 +159,13 @@ cv::Point2f AimSystem::execute(float dt) {
     
     cv::Point2f delta = aim_engine_->getAimDelta(dt);
     
+    // 更详细的调试输出
+    static int debug_cnt = 0;
+    if (debug_cnt++ % 60 == 0) {
+        printf("[AIMSYS] dt=%.4f raw_delta=(%.2f,%.2f) enabled=%d hasTarget=%d\n", 
+               dt, delta.x, delta.y, enabled_, aim_engine_->hasTarget());
+    }
+    
     if (std::abs(delta.x) < 0.5f && std::abs(delta.y) < 0.5f) {
         return {0, 0};
     }
@@ -170,12 +180,15 @@ cv::Point2f AimSystem::execute(float dt) {
         }
     }
     
-    cv::Point2f scaled_delta = delta * hid_config_.sensitivity * strength;
+    // 临时放大倍数，测试更快的吸附
+    const float TEMP_MULTIPLIER = 100.0f;
+    cv::Point2f scaled_delta = delta * hid_config_.sensitivity * strength * TEMP_MULTIPLIER;
     
     scaled_delta.x = std::clamp(scaled_delta.x, -127.0f, 127.0f);
     scaled_delta.y = std::clamp(scaled_delta.y, -127.0f, 127.0f);
     
-    aim_engine_->updateCrosshairPosition(scaled_delta.x, scaled_delta.y);
+    // 注意：不要在这里调用 updateCrosshairPosition，因为 hid_relay.cpp 会处理
+    // 避免重复更新导致震荡！
     
     return scaled_delta;
 }
@@ -239,8 +252,103 @@ aim::AimTarget AimSystem::getTarget() const {
     return aim_engine_->getCurrentTarget();
 }
 
+bool AimSystem::loadPresetFromFile(aim::AimPreset preset, aim::AimConfig& cfg) {
+    if (config_file_.empty()) return false;
+    
+    std::ifstream file(config_file_);
+    if (!file.is_open()) {
+        fprintf(stderr, "[AIM] Failed to open config file: %s\n", config_file_.c_str());
+        return false;
+    }
+
+    std::string section;
+    switch (preset) {
+        case aim::AimPreset::LEGIT: section = "preset_legit"; break;
+        case aim::AimPreset::SEMI_RAGE: section = "preset_semirage"; break;
+        case aim::AimPreset::RAGE: section = "preset_rage"; break;
+        case aim::AimPreset::CUSTOM: section = "preset_custom"; break;
+        default: section = "preset_legit"; break;
+    }
+
+    auto trim_str = [](const std::string& s) -> std::string {
+        size_t start = s.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return "";
+        size_t end = s.find_last_not_of(" \t\r\n");
+        return s.substr(start, end - start + 1);
+    };
+
+    auto parse_val = [&trim_str](const std::string& s) -> std::string {
+        size_t comment_pos = s.find('#');
+        std::string result = (comment_pos != std::string::npos) ? s.substr(0, comment_pos) : s;
+        return trim_str(result);
+    };
+
+    bool in_section = false;
+    std::string line;
+    std::map<std::string, std::string> values;
+
+    while (std::getline(file, line)) {
+        line = trim_str(line);
+        if (line.empty() || line[0] == ';') continue;
+        if (line[0] == '[') {
+            size_t end = line.find(']');
+            if (end != std::string::npos) {
+                in_section = (line.substr(1, end - 1) == section);
+            }
+            continue;
+        }
+        if (!in_section) continue;
+        size_t eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) continue;
+        std::string key = trim_str(line.substr(0, eq_pos));
+        std::string val = parse_val(line.substr(eq_pos + 1));
+        values[key] = val;
+    }
+    file.close();
+
+    if (values.empty()) {
+        fprintf(stderr, "[AIM] Section [%s] not found in config file\n", section.c_str());
+        return false;
+    }
+
+    if (values.count("stiffness")) cfg.spring.stiffness = std::stof(values["stiffness"]);
+    if (values.count("damping")) cfg.spring.damping = std::stof(values["damping"]);
+    if (values.count("max_speed")) cfg.spring.max_speed = std::stof(values["max_speed"]);
+    if (values.count("micro_jitter")) cfg.spring.micro_jitter = std::stof(values["micro_jitter"]);
+    if (values.count("overshoot_ratio")) cfg.spring.overshoot_ratio = std::stof(values["overshoot_ratio"]);
+    if (values.count("close_strength")) cfg.strength.close_strength = std::stof(values["close_strength"]);
+    if (values.count("mid_strength")) cfg.strength.mid_strength = std::stof(values["mid_strength"]);
+    if (values.count("far_strength")) cfg.strength.far_strength = std::stof(values["far_strength"]);
+    if (values.count("fire_delay_frames")) cfg.fire_delay_frames = std::stoi(values["fire_delay_frames"]);
+
+    const char* preset_name = "UNKNOWN";
+    switch (preset) {
+        case aim::AimPreset::LEGIT: preset_name = "LEGIT"; break;
+        case aim::AimPreset::SEMI_RAGE: preset_name = "SEMI_RAGE"; break;
+        case aim::AimPreset::RAGE: preset_name = "RAGE"; break;
+        case aim::AimPreset::CUSTOM: preset_name = "CUSTOM"; break;
+        default: preset_name = "LEGIT"; break;
+    }
+    printf("[AIM] Loaded preset %s from config file: %s\n", preset_name, config_file_.c_str());
+    return true;
+}
+
 void AimSystem::setPreset(aim::AimPreset preset) {
+    current_preset_ = preset;
     aim_config_ = aim::getPreset(preset);
+    
+    if (!loadPresetFromFile(preset, aim_config_)) {
+        const char* preset_name = "UNKNOWN";
+        switch (preset) {
+            case aim::AimPreset::LEGIT: preset_name = "LEGIT"; break;
+            case aim::AimPreset::SEMI_RAGE: preset_name = "SEMI_RAGE"; break;
+            case aim::AimPreset::RAGE: preset_name = "RAGE"; break;
+            case aim::AimPreset::CUSTOM: preset_name = "CUSTOM"; break;
+            default: preset_name = "LEGIT"; break;
+        }
+        printf("[AIM] Using built-in defaults for preset %s\n", preset_name);
+    }
+    
     if (aim_engine_) {
         aim_engine_->setConfig(aim_config_);
     }

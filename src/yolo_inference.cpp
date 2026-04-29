@@ -286,7 +286,7 @@ void fast_letterbox(const cv::Mat& image, uint8_t* output_buf,
     fast_letterbox_opencv(image, output_buf, target_w, target_h, scale, pad_left, pad_top);
 }
 
-// Internal: run NPU inference and postprocess
+// Internal: run NPU inference and postprocess (优化版: 只保留离屏幕中心最近的一个目标)
 static std::vector<PoseDetection> run_inference_postprocess(
     rknn_context ctx,
     uint8_t* input_buf,
@@ -353,48 +353,23 @@ static std::vector<PoseDetection> run_inference_postprocess(
     
     int num_detections = 8400;
     int num_classes = 56;
-    std::vector<PoseDetection> candidates;
-    candidates.reserve(20);
     
     bool is_nchw = (output_dims[1] == 56 && output_dims[2] == 8400);
     
-    // Debug: print first few raw output values (disabled for production)
-    // printf("[DEBUG] Output type=%d, is_nchw=%d, output.size=%u\n", output_type, is_nchw, output.size);
-    // printf("[DEBUG] Channel 0-7 values at index 0: ");
-    // for (int c = 0; c < 8; c++) {
-    //     printf("ch%d=%.3f ", c, get_value(c * num_detections + 0));
-    // }
-    // printf("\n");
+    // ========== 优化：只保留离屏幕中心最近的一个目标 ==========
+    float screen_center_x = 1920.0f / 2.0f;
+    float screen_center_y = 1080.0f / 2.0f;
     
-    // Find max score across ALL detections
-    float max_score = 0;
-    for (int i = 0; i < num_detections; i++) {
-        float score = get_value(4 * num_detections + i);
-        if (score > max_score) {
-            max_score = score;
-        }
-    }
-    // printf("[DEBUG] Max score: %.3f at index %d\n", max_score, max_idx);
+    PoseDetection best_target;
+    float best_distance_sq = 1e20f;  // 很大的初始值
     
-    // Print some statistics about the scores
-    int count_0 = 0, count_1 = 0, count_10 = 0, count_50 = 0, count_100 = 0;
-    for (int i = 0; i < num_detections; i++) {
-        float score = get_value(4 * num_detections + i);
-        if (score < 0.001f) count_0++;
-        else if (score < 1.0f) count_1++;
-        else if (score < 10.0f) count_10++;
-        else if (score < 50.0f) count_50++;
-        else count_100++;
-    }
-    // printf("[DEBUG] Score stats: <0.001=%d, <1=%d, <10=%d, <50=%d, >=50=%d\n", count_0, count_1, count_10, count_50, count_100);
-    
+    // 遍历所有检测
     for (int i = 0; i < num_detections; i++) {
         float cx, cy, w, h, score;
         float kp_data[51];
         
         if (is_nchw) {
             // NCHW format: [batch, channels, num_detections]
-            // Each channel contains all detections for that attribute
             cx = get_value(i);
             cy = get_value(num_detections + i);
             w  = get_value(2 * num_detections + i);
@@ -424,48 +399,38 @@ static std::vector<PoseDetection> run_inference_postprocess(
         if (score < conf_threshold) {
             continue;
         }
-
-        PoseDetection det;
-        det.score = score;
         
-        det.x = (cx - pad_left) / scale;
-        det.y = (cy - pad_top) / scale;
-        det.w = w / scale;
-        det.h = h / scale;
-
-        for (int k = 0; k < NUM_KP; k++) {
-            det.kp[k][0] = (kp_data[k * 3 + 0] - pad_left) / scale;
-            det.kp[k][1] = (kp_data[k * 3 + 1] - pad_top) / scale;
-            det.kp_score[k] = kp_data[k * 3 + 2];
+        // 反算到屏幕坐标
+        float det_x = (cx - pad_left) / scale;
+        float det_y = (cy - pad_top) / scale;
+        
+        // 计算离屏幕中心的距离平方 (避免开方，更快)
+        float dx = det_x - screen_center_x;
+        float dy = det_y - screen_center_y;
+        float dist_sq = dx * dx + dy * dy;
+        
+        // 更新最佳目标
+        if (dist_sq < best_distance_sq) {
+            best_distance_sq = dist_sq;
+            
+            best_target.score = score;
+            best_target.x = det_x;
+            best_target.y = det_y;
+            best_target.w = w / scale;
+            best_target.h = h / scale;
+            
+            for (int k = 0; k < NUM_KP; k++) {
+                best_target.kp[k][0] = (kp_data[k * 3 + 0] - pad_left) / scale;
+                best_target.kp[k][1] = (kp_data[k * 3 + 1] - pad_top) / scale;
+                best_target.kp_score[k] = kp_data[k * 3 + 2];
+            }
         }
-
-        candidates.push_back(det);
     }
     
-    // Debug: print first detection coordinates (disabled for production)
-    // if (!candidates.empty()) {
-    //     const auto& det = candidates[0];
-    //     printf("[DEBUG] Detection: bbox=(%.1f,%.1f,%.1f,%.1f) score=%.3f\n", 
-    //            det.x, det.y, det.w, det.h, det.score);
-    // }
-
-    // Count score distribution
-    int count_09 = 0, count_05 = 0, count_01 = 0, count_001 = 0;
-    for (const auto& c : candidates) {
-        if (c.score > 0.9f) count_09++;
-        if (c.score > 0.5f) count_05++;
-        if (c.score > 0.1f) count_01++;
-        if (c.score > 0.01f) count_001++;
+    // 如果找到最佳目标，加入结果 (跳过NMS，因为只需要一个)
+    if (best_distance_sq < 1e20f) {
+        result.push_back(best_target);
     }
-    // printf("[DEBUG] Score distribution: >0.9=%d, >0.5=%d, >0.1=%d, >0.01=%d\n", count_09, count_05, count_01, count_001);
-    
-    std::vector<PoseDetection> nms_result;
-    if (!candidates.empty()) {
-        // Lower NMS threshold to detect more overlapping objects (e.g., multiple people close together)
-        nms(candidates, nms_result, 0.45f);
-    }
-    
-    // printf("[DEBUG] Candidates: %zu, After NMS: %zu\n", candidates.size(), nms_result.size());
     
     auto t3 = high_resolution_clock::now();
     if (timing) {
@@ -474,7 +439,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
 
     rknn_outputs_release(ctx, 1, &output);
 
-    return nms_result;
+    return result;
 }
 
 std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, float conf_threshold) {

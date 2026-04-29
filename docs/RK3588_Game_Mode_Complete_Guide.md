@@ -4,6 +4,10 @@
 > 版本: 1.0
 
 ---
+RK3588主板机有3个NPU线程可并行：
+NPU 线程1：视频处理POSE推理检测功能
+CPU 线程 2：执行最高优先级，键盘鼠标控制系统
+CPU 线程 3：暂时空，你可以推荐处理的任务
 
 ## 📑 目录
 
@@ -567,6 +571,7 @@ key_game_mode = F9      # 游戏模式开关
 key_legit = F1          # Legit 预设
 key_semirage = F2       # Semi-rage 预设
 key_rage = F3           # Rage 预设
+
 ```
 
 ### 预设参数对比
