@@ -356,7 +356,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
     
     bool is_nchw = (output_dims[1] == 56 && output_dims[2] == 8400);
     
-    // ========== 优化：只保留离屏幕中心最近的一个目标 ==========
+    // ========== 优化：只保留离屏幕中心最近的一个目标 + 过滤误检 ==========
     float screen_center_x = 1920.0f / 2.0f;
     float screen_center_y = 1080.0f / 2.0f;
     
@@ -403,6 +403,15 @@ static std::vector<PoseDetection> run_inference_postprocess(
         // 反算到屏幕坐标
         float det_x = (cx - pad_left) / scale;
         float det_y = (cy - pad_top) / scale;
+        float det_w = w / scale;
+        float det_h = h / scale;
+        
+        // ========== 简化过滤：只保留最关键的检查 ==========
+        
+        // 过滤1: 检测框大小限制（避免太小或太大的误检）
+        if (det_w < 10.0f || det_h < 15.0f || det_w > 1000.0f || det_h > 1200.0f) {
+            continue;
+        }
         
         // 计算离屏幕中心的距离平方 (避免开方，更快)
         float dx = det_x - screen_center_x;
@@ -416,8 +425,8 @@ static std::vector<PoseDetection> run_inference_postprocess(
             best_target.score = score;
             best_target.x = det_x;
             best_target.y = det_y;
-            best_target.w = w / scale;
-            best_target.h = h / scale;
+            best_target.w = det_w;
+            best_target.h = det_h;
             
             for (int k = 0; k < NUM_KP; k++) {
                 best_target.kp[k][0] = (kp_data[k * 3 + 0] - pad_left) / scale;

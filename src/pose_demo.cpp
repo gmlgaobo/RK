@@ -199,6 +199,9 @@ static int parse_key_name(const char* name) {
 const char* g_keyboard_device = nullptr;  // "/dev/input/event0"
 const char* g_mouse_device = nullptr;     // "/dev/input/event1"
 
+// 检测配置
+float g_confidence_threshold = 0.6f;      // 置信度阈值
+
 // 自动探测输入设备
 static std::string find_input_device(const std::string& pattern) {
     DIR* dir = opendir("/dev/input/by-path/");
@@ -299,13 +302,13 @@ void npu_thread(YoloPoseInference* inference) {
         auto t0 = high_resolution_clock::now();
         
         // Run NPU inference directly with preprocessed buffer
-        // Use lower confidence threshold (0.25) to detect more distant/small targets
+        // 使用配置文件中的置信度阈值
         frame.detections = inference->detect_raw(
             frame.preprocessed.data,
             frame.scale,
             frame.pad_left,
             frame.pad_top,
-            0.25f
+            g_confidence_threshold
         );
         
         auto t1 = high_resolution_clock::now();
@@ -473,6 +476,16 @@ int main(int argc, char** argv) {
                     if (eq) { 
                         std::string val = parse_value(eq+1);
                         g_key_game_mode = parse_key_name(val.c_str()); 
+                    }
+                }
+                // 解析检测配置
+                if (strstr(line, "confidence_threshold = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) {
+                        float val = atof(eq + 1);
+                        if (val >= 0.0f && val <= 1.0f) {
+                            g_confidence_threshold = val;
+                        }
                     }
                 }
             }
