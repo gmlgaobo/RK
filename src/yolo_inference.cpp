@@ -302,6 +302,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
     float pad_left,
     float pad_top,
     float conf_threshold,
+    float region_ratio,
     YoloPoseInference::TimingStats* timing)
 {
     std::vector<PoseDetection> result;
@@ -356,9 +357,17 @@ static std::vector<PoseDetection> run_inference_postprocess(
     
     bool is_nchw = (output_dims[1] == 56 && output_dims[2] == 8400);
     
-    // ========== 优化：只保留离屏幕中心最近的一个目标 + 过滤误检 ==========
+    // ========== 优化：只保留离屏幕中心最近的一个目标 + 检测范围限制 ==========
     float screen_center_x = 1920.0f / 2.0f;
     float screen_center_y = 1080.0f / 2.0f;
+    
+    // 计算检测范围边界
+    float region_half_w = 1920.0f * region_ratio / 2.0f;
+    float region_half_h = 1080.0f * region_ratio / 2.0f;
+    float region_min_x = screen_center_x - region_half_w;
+    float region_max_x = screen_center_x + region_half_w;
+    float region_min_y = screen_center_y - region_half_h;
+    float region_max_y = screen_center_y + region_half_h;
     
     PoseDetection best_target;
     float best_distance_sq = 1e20f;  // 很大的初始值
@@ -406,6 +415,13 @@ static std::vector<PoseDetection> run_inference_postprocess(
         float det_w = w / scale;
         float det_h = h / scale;
         
+        // ========== 检测范围过滤 ==========
+        // 只保留中心区域内的目标
+        if (det_x < region_min_x || det_x > region_max_x || 
+            det_y < region_min_y || det_y > region_max_y) {
+            continue;
+        }
+        
         // ========== 简化过滤：只保留最关键的检查 ==========
         
         // 过滤1: 检测框大小限制（避免太小或太大的误检）
@@ -413,7 +429,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
             continue;
         }
         
-        // 计算离屏幕中心的距离平方 (避免开方，更快)
+        // 计算离屏幕中心的距离平方（避免开方，更快）
         float dx = det_x - screen_center_x;
         float dy = det_y - screen_center_y;
         float dist_sq = dx * dx + dy * dy;
@@ -451,7 +467,7 @@ static std::vector<PoseDetection> run_inference_postprocess(
     return result;
 }
 
-std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, float conf_threshold) {
+std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, float conf_threshold, float region_ratio) {
     std::vector<PoseDetection> result;
     if (!initialized_) {
         return result;
@@ -469,7 +485,7 @@ std::vector<PoseDetection> YoloPoseInference::detect(const cv::Mat& bgr_img, flo
         rknn_ctx_, input_buf_, input_buf_size_,
         input_width_, input_height_, output_dims_,
         output_type_, output_quantized_, output_scale_, output_zero_point_,
-        scale, pad_left, pad_top, conf_threshold, &last_timing_);
+        scale, pad_left, pad_top, conf_threshold, region_ratio, &last_timing_);
 
     return result;
 }
@@ -479,7 +495,8 @@ std::vector<PoseDetection> YoloPoseInference::detect_raw(
     float scale,
     float pad_left,
     float pad_top,
-    float conf_threshold)
+    float conf_threshold,
+    float region_ratio)
 {
     std::vector<PoseDetection> result;
     if (!initialized_) {
@@ -491,7 +508,7 @@ std::vector<PoseDetection> YoloPoseInference::detect_raw(
         rknn_ctx_, preprocessed_buf, input_buf_size_,
         input_width_, input_height_, output_dims_,
         output_type_, output_quantized_, output_scale_, output_zero_point_,
-        scale, pad_left, pad_top, conf_threshold, nullptr);
+        scale, pad_left, pad_top, conf_threshold, region_ratio, nullptr);
 
     return result;
 }

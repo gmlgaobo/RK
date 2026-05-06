@@ -200,7 +200,8 @@ const char* g_keyboard_device = nullptr;  // "/dev/input/event0"
 const char* g_mouse_device = nullptr;     // "/dev/input/event1"
 
 // 检测配置
-float g_confidence_threshold = 0.6f;      // 置信度阈值
+float g_confidence_threshold = 0.35f;      // 置信度阈值
+float g_detection_region_ratio = 0.7f;     // 检测范围比例 (0.0-1.0)
 
 // 自动探测输入设备
 static std::string find_input_device(const std::string& pattern) {
@@ -302,13 +303,14 @@ void npu_thread(YoloPoseInference* inference) {
         auto t0 = high_resolution_clock::now();
         
         // Run NPU inference directly with preprocessed buffer
-        // 使用配置文件中的置信度阈值
+        // 使用配置文件中的置信度阈值和检测范围
         frame.detections = inference->detect_raw(
             frame.preprocessed.data,
             frame.scale,
             frame.pad_left,
             frame.pad_top,
-            g_confidence_threshold
+            g_confidence_threshold,
+            g_detection_region_ratio
         );
         
         auto t1 = high_resolution_clock::now();
@@ -488,6 +490,15 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                if (strstr(line, "detection_region_ratio = ")) {
+                    char* eq = strstr(line, "=");
+                    if (eq) {
+                        float val = atof(eq + 1);
+                        if (val >= 0.1f && val <= 1.0f) {
+                            g_detection_region_ratio = val;
+                        }
+                    }
+                }
             }
             fclose(fp);
             printf("Loaded config from: %s\n", config_file);
@@ -556,10 +567,19 @@ int main(int argc, char** argv) {
 
     YoloPoseInference inference;
     const char* loaded_model = nullptr;
-    for (const auto& path : model_paths) {
+    // 优先使用 fast 模型（优先级最高）
+    std::vector<std::string> model_paths_fast = {
+        exe_dir + "yolov8n-pose_fast.rknn",
+        "/home/ztl/github/RK/src/yolov8n-pose_fast.rknn",
+        exe_dir + "yolov8n-pose.rknn",
+        "/home/ztl/github/RK/src/yolov8n-pose.rknn"
+    };
+    for (const auto& path : model_paths_fast) {
+        printf("Trying model: %s\n", path.c_str());
         if (inference.init(path.c_str()) == 0) {
             loaded_model = path.c_str();
             model_path = loaded_model;
+            printf("✅ Loaded fast model: %s\n", model_path);
             break;
         }
     }
@@ -647,6 +667,13 @@ int main(int argc, char** argv) {
     float total_npu = 0;
     float total_draw = 0;
     float total_all = 0;
+    
+    // ========== 滑动平均 FPS 统计 ==========
+    static const int FPS_WINDOW = 30;  // 30帧滑动窗口
+    float fps_history[FPS_WINDOW] = {0};
+    int fps_index = 0;
+    float current_fps = 0.0f;
+    float avg_cap = 0.0f, avg_pre = 0.0f, avg_npu = 0.0f;
 
     while (true) {
         auto t0 = high_resolution_clock::now();
@@ -682,6 +709,19 @@ int main(int argc, char** argv) {
             
             // Draw detections
             cv::Mat& display_img = display_frame.frame;
+            
+            // ========== 绘制检测范围框 ==========
+            // 在屏幕中心画一个框，表示当前检测范围
+            float region_half_w = 1920.0f * g_detection_region_ratio / 2.0f;
+            float region_half_h = 1080.0f * g_detection_region_ratio / 2.0f;
+            int region_min_x = static_cast<int>(960.0f - region_half_w);
+            int region_max_x = static_cast<int>(960.0f + region_half_w);
+            int region_min_y = static_cast<int>(540.0f - region_half_h);
+            int region_max_y = static_cast<int>(540.0f + region_half_h);
+            
+            // 用虚线画检测范围
+            cv::rectangle(display_img, cv::Point(region_min_x, region_min_y), 
+                         cv::Point(region_max_x, region_max_y), cv::Scalar(255, 255, 0), 2, cv::LINE_AA);
             
             for (const auto& det : display_frame.detections) {
                 int x1 = static_cast<int>(det.x - det.w / 2.0f);
@@ -746,12 +786,33 @@ int main(int argc, char** argv) {
 
             char info_text[256];
             float total_ms_so_far = duration<float>(high_resolution_clock::now() - t0).count() * 1000.0f;
+            float instant_fps = 1000.0f / total_ms_so_far;
+            
+            // ========== 滑动平均计算 ==========
+            fps_history[fps_index] = instant_fps;
+            fps_index = (fps_index + 1) % FPS_WINDOW;
+            
+            float sum = 0.0f;
+            int valid_count = 0;
+            for (int i = 0; i < FPS_WINDOW; i++) {
+                if (fps_history[i] > 0) {
+                    sum += fps_history[i];
+                    valid_count++;
+                }
+            }
+            if (valid_count > 0) {
+                current_fps = sum / valid_count;
+            }
+            
+            // 各阶段时间滑动平均
+            avg_cap = avg_cap * 0.95f + display_frame.capture_time * 0.05f;
+            avg_pre = avg_pre * 0.95f + display_frame.preprocess_time * 0.05f;
+            avg_npu = avg_npu * 0.95f + display_frame.npu_time * 0.05f;
+            
             snprintf(info_text, sizeof(info_text), 
-                    "Cap:%.0f Pre:%.0f NPU:%.0f | %.0fms %.0fFPS %s",
-                    display_frame.capture_time,
-                    display_frame.preprocess_time,
-                    display_frame.npu_time,
-                    total_ms_so_far, 1000.0f / total_ms_so_far,
+                    "Cap:%.0f Pre:%.0f NPU:%.0f | %.0fFPS %s",
+                    avg_cap, avg_pre, avg_npu,
+                    current_fps,
                     g_aim_enabled ? "[AIM ON]" : "");
             cv::putText(display_img, info_text, cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
@@ -785,11 +846,21 @@ int main(int argc, char** argv) {
             g_aim_system->update(g_latest_detections, width, height);
         }
         
-        // Print stats every 10 seconds (disabled for clean output)
+        // Print stats every 2 seconds (for performance comparison)
         double elapsed = get_time_ms() - start_time;
-        if (elapsed >= 10000.0 && frame_count > 0) {
-            // printf("FPS: %.1f\n", 1000.0f * frame_count / elapsed);
-            
+        if (elapsed >= 2000.0 && frame_count > 0) {
+            float avg_all = total_all / frame_count;
+            printf("[REF-FPS] %.1f FPS | avg_total=%.1fms | cap=%.1f pre=%.1f npu=%.1f draw=%.1f | frames=%d dropped=%zu\n",
+                   1000.0f * frame_count / elapsed,
+                   avg_all,
+                   total_capture / frame_count,
+                   total_preprocess / frame_count,
+                   total_npu / frame_count,
+                   total_draw / frame_count,
+                   frame_count,
+                   total_dropped_frames.load());
+            fflush(stdout);
+
             frame_count = 0;
             total_capture = 0;
             total_preprocess = 0;
